@@ -117,6 +117,7 @@ class Run:
         for observer in self.observers:
             observer.log_started_run(
                 self._id,
+                self.start_time,
                 trigger=trigger,
                 starter=starter,
             )
@@ -128,7 +129,7 @@ class Run:
 
         # Update info on observers
         for observer in self.observers:
-            observer.log_completed_run(elapsed_time)
+            observer.log_completed_run(self._id, self.stop_time)
 
     def _emit_interrupted(self):
         self.status = RunStatus.INTERRUPTED
@@ -136,7 +137,7 @@ class Run:
 
         # Update info on observers
         for observer in self.observers:
-            observer.log_interrupted_run(elapsed_time)
+            observer.log_interrupted_run(self._id, elapsed_time)
 
     def _emit_failed(self):
         self.status = RunStatus.FAILED
@@ -144,7 +145,7 @@ class Run:
 
         # Update info on observers
         for observer in self.observers:
-            observer.log_failed_run(elapsed_time)
+            observer.log_failed_run(self._id, elapsed_time)
 
     def _execute_hooks(self, hooks):
         for hook in hooks:
@@ -170,8 +171,10 @@ class Run:
             self._stop_heartbeat()
             self._execute_hooks(self.post_run_hooks)
         except KeyboardInterrupt as k:
+            self._stop_heartbeat()
             self._emit_interrupted()
         except Exception as ex:
+            self._stop_heartbeat()
             self._emit_failed()
         finally:
             for observer in self.observers:
