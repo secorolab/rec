@@ -164,7 +164,7 @@ class Run:
             self._emit_started()
             self._start_heartbeat()
             self._execute_hooks(self.pre_run_hooks)
-            self.result = self.main(None)
+            self.result = self.main()
             print("Result: {}".format(self.result))
             self._emit_completed()
             self._stop_heartbeat()
