@@ -159,7 +159,6 @@ class Run:
         A centralized runner can start and complete a run. Decentralized runners should not use this method.
         :return:
         """
-        import time
 
         try:
             self._emit_started()
@@ -182,19 +181,41 @@ class Run:
 
         return self.result
 
-    def log_scalar(self, metric_name, value, step=None):
+    def log_scalar(self, metric_name, value, step: int = None):
+        """Log a measurement at runtime
+
+        :param metric_name: Name of the metric being logged
+        :param value: The measured value
+        :param step: Optional. Integer value representing the iteration number
+        :return:
+        """
         pass
 
-    def sources(self):
+    def log_sources(self):
+        """Log the source code files used to execute this run (e.g., file name/path, md5)
+        :return:
+        """
         pass
 
-    def repositories(self):
+    def log_repositories(self):
+        """
+        Log the git information of the sources used in this run (url, commit/tag, uncommited changes)
+        :return:
+        """
         pass
 
-    def dependencies(self):
+    def log_dependencies(self):
+        """
+        Log the dependencies of the sources used in this run (e.g., package name, version)
+        :return:
+        """
         pass
 
-    def host_info(self):
+    def log_host_info(self):
+        """
+        Log information about the machine executing this run (e.g., cpu, gpu, OS, user, hostname, python version and venv, env variables, etc.)
+        :return:
+        """
         pass
 
     def add_agent(self, agent_id: str, agent_type: str, **kwargs):
@@ -217,6 +238,10 @@ class Run:
     ):
         """
         Add a resource to the run
+
+        This method only records the filename and minimal metadata.
+        If you need to process file contents in some way, use a Feature.
+
         :param filename: The file path of the resource
         :param usage_activity: The activity that uses this resource. Default: This run
         :param usage_time: The time this resource is used by the activity.
@@ -237,6 +262,10 @@ class Run:
     ):
         """
         Add an artefact to the run
+
+        This method only records the filename and minimal metadata.
+        If you need to process file contents in some way, use a Feature.
+
         :param filename: he file path of the generated artefact
         :param gen_activity: The generating activity. Default: This run
         :param generated_time: The time the artefact was generated
@@ -248,6 +277,10 @@ class Run:
             generated_time = datetime.datetime.now(datetime.UTC)
 
     def info(self):
+        """Print out a summary of the run data
+
+        :return:
+        """
         pass
 
 
