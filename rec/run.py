@@ -54,8 +54,9 @@ class Run:
             pass
         if self._id is None:
             # First query the DB to see if there is any run marked as active.
+            _id = self.observers[0].query_active_run()
             # If no run is marked as active, create one in the DB and return the ID
-            pass
+            return _id
 
     def _stop_time(self):
         self.stop_time = datetime.datetime.now(datetime.UTC)
@@ -111,16 +112,18 @@ class Run:
         self.status = RunStatus.RUNNING
         self._id = self._get_active_run()
         self.start_time = datetime.datetime.now(datetime.UTC)
-        print("Starting run {}".format(self._id))
 
         # Update info on observers
         for observer in self.observers:
-            observer.log_started_run(
+            _id = observer.log_started_run(
                 self._id,
                 self.start_time,
                 trigger=trigger,
                 starter=starter,
             )
+            if self._id is None:
+                self._id = _id
+                print("Starting run with ID {}".format(self._id))
 
     def _emit_completed(self):
         self.status = RunStatus.COMPLETED

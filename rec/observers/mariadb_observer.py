@@ -92,8 +92,8 @@ class MariaDBObserver(BaseObserver):
         template = f"INSERT INTO {self.table} (status, run_info) VALUES (?, ?);"
         try:
             self.cursor.execute(template, (status, json.dumps(run_info)))
-            print(f"Inserted {self.cursor.rowcount} rows.")
-            print(f"Last inserted ID: {self.cursor.lastrowid}")
+            # print(f"Inserted {self.cursor.rowcount} rows.")
+            # print(f"Last inserted ID: {self.cursor.lastrowid}")
         except mariadb.Error as e:
             print(f"Error: {e}")
 
@@ -158,6 +158,18 @@ class MariaDBObserver(BaseObserver):
 
         return d
 
+    def query_active_run(self):
+        try:
+            self.cursor.execute(
+                f"SELECT id, status FROM {self.table} WHERE status ='RUNNING'"
+            )
+        except mariadb.Error as e:
+            print(f"An error occurred: {e}")
+            sys.exit(1)
+
+        for row in self.cursor:
+            return row[0]
+
     def log_run_heartbeat(self, run_id: int, beat_time: datetime, result):
         pass
 
@@ -170,10 +182,16 @@ class MariaDBObserver(BaseObserver):
     def log_started_run(
         self, run_id: int, started_time: datetime, trigger=None, starter=None
     ):
-        pass
+        if run_id is None:
+            return self.add_run("RUNNING", started_time)
+        else:
+            print(f"Run {run_id} was already started at {started_time}")
 
     def log_completed_run(self, run_id: int, completed_time: datetime):
-        pass
+        self.update_run_data(run_id, "status", "COMPLETED")
+
+        # TODO Update the run_info dictionary
+        run_info = {"completed_time": completed_time.isoformat()}
 
     def log_interrupted_run(self, run_id: int, elapsed_time: timedelta):
         pass
@@ -194,12 +212,18 @@ if __name__ == "__main__":
     db = MariaDBObserver()
     print("Writing to the DB dummy data")
     run_id = db.add_run("RUNNING", datetime.now(dt.UTC))
+    info = db.get_run(run_id)
+    print(info)
+
     db.update_run_data(run_id, "scenario_id", "db-test-01")
     db.update_run_data(
         run_id, "agents", {"agent_id": "robot-01", "agent_type": "SoftwareAgent"}
     )
+    db.query_active_run()
     db.update_run_data(run_id, "status", "COMPLETED")
+
     print("Getting run info")
     info = db.get_run(run_id)
     print(info)
+
     db.close()
