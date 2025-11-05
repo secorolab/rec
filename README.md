@@ -11,6 +11,27 @@ In your terminal, go to where you have cloned this repository and install it in 
 pip install -e .
 ```
 
+## Examples
+
+The current skeleton of the code allows you to run two examples: The `MariaDBObserver` and a `Run`.
+
+### Observers
+
+An Observer is an interface to a type of data storage. For now, we have added a `MariaDBObserver` with some basic functionality. To test it you can run the following in your terminal:
+
+```shell
+python rec/observers/mariadb_observer.py
+```
+
+### Creating a run
+
+The [example](examples/decentral_run.py) shows how to create a run object, attach an observer, and define the `main` function of your tests. You can test its basic functionality by running the script:
+
+```shell
+python examples/decentral_run.py
+```
+
+
 ## Connecting to MariaDB
 
 Create an `.env` file at the root of this repository and update the contents with your credentials and the IP of the server where its deployed:
