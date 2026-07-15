@@ -7,4 +7,5 @@ to an archive file, MariaDB, or both.
 .. toctree::
    :maxdepth: 2
 
+   install
    tutorial

@@ -136,6 +136,7 @@ class MariaDBObserver(GraphObserver):
         )
 
     def close(self):
-        self._persist()
+        if self.graph.value(self.run, REC["run-id"]) is not None:
+            self._persist()
         self.cursor.close()
         self.conn.close()
