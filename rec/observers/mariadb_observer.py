@@ -19,7 +19,13 @@ from rec.observers.graph_observer import CONTEXT, GraphObserver, REC
 
 
 class MariaDBObserver(GraphObserver):
-    """Persist the same JSON-LD REC graph as ``FileObserver`` in MariaDB."""
+    """Persist REC JSON-LD in MariaDB and import file archives.
+
+    Args:
+        run_id: Existing run to reopen, or an ID generated for a new run.
+        db_name: Database selected from the configured MariaDB server.
+        table: Base table name for runs and file-source mappings.
+    """
 
     def __init__(self, run_id=None, db_name="logbook", table="runs"):
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
@@ -58,6 +64,7 @@ class MariaDBObserver(GraphObserver):
         self._load_existing()
 
     def query_active_run(self):
+        """Return one currently running database run, if present."""
         return self._active_run_id()
 
     def _active_run_id(self):
@@ -89,7 +96,7 @@ class MariaDBObserver(GraphObserver):
         self.archive_path = str(archive_path)
 
     def sync_file(self, path):
-        """Import one completed file-backed run without changing its identities."""
+        """Import one file-backed run without changing its REC identities."""
         graph = Graph().parse(path, format="json-ld")
         run = next(graph.subjects(REC["run-id"], None), None)
         if run is None:
@@ -103,7 +110,7 @@ class MariaDBObserver(GraphObserver):
         self._upsert_file_source(str(file_id), run_id, path, started_at.toPython())
 
     def sync_files(self, directory, started_after=None):
-        """Import file runs in start-time order, optionally after a start-time cursor."""
+        """Import archive files in start-time order, optionally after a cursor."""
         files = []
         for path in sorted(Path(directory).rglob("*.jsonld")):
             graph = Graph().parse(path, format="json-ld")
@@ -136,6 +143,7 @@ class MariaDBObserver(GraphObserver):
         )
 
     def close(self):
+        """Flush a live run, then close the database cursor and connection."""
         if self.graph.value(self.run, REC["run-id"]) is not None:
             self._persist()
         self.cursor.close()

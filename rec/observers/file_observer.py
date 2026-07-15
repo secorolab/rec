@@ -14,7 +14,12 @@ from rec.observers.graph_observer import GraphObserver, REC
 
 
 class FileObserver(GraphObserver):
-    """Persist the shared REC graph as one JSON-LD file."""
+    """Persist one REC graph as JSON-LD.
+
+    Args:
+        path: Archive file to create or reopen.
+        file_id: Stable archive identity. Generated for a new archive.
+    """
 
     def __init__(self, path, file_id=None):
         self.path = Path(path)
