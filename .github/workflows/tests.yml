@@ -32,12 +32,17 @@ jobs:
           --health-retries=5
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: secorolab/metamodels
+          ref: agent/rec-lifecycle-shapes
+          path: metamodels
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
       - run: sudo apt-get update
       - run: sudo apt-get install --yes libmariadb-dev
-      - run: pip install -e ".[mariadb]" pytest
+      - run: pip install -e ".[mariadb,dev]"
       - run: pytest -q
         env:
           MARIADB_USER: rec
@@ -45,3 +50,4 @@ jobs:
           MARIADB_HOST: 127.0.0.1
           MARIADB_PORT: 3306
           REC_TEST_MARIADB_DATABASE: rec_test
+          REC_METAMODELS_DIR: metamodels

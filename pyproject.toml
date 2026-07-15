@@ -17,7 +17,7 @@ maintainers = [
 ]
 
 [project.optional-dependencies]
-dev = ["black>=24.4.2"]
+dev = ["black>=24.4.2", "pytest", "pyshacl"]
 mariadb = ["mariadb", "python-dotenv"]
 docs = ["sphinx", "furo"]
 

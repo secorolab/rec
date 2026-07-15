@@ -17,7 +17,9 @@ QUDT = Namespace("http://qudt.org/schema/qudt/")
 QK = Namespace("http://qudt.org/vocab/quantitykind/")
 UNIT = Namespace("http://qudt.org/vocab/unit/")
 DCAT = Namespace("http://www.w3.org/ns/dcat#")
-CONTEXT = {"prov": str(PROV), "rec": str(REC), "qudt": str(QUDT), "dcat": str(DCAT)}
+REC_CONTEXT = "https://secorolab.github.io/metamodels/rec/rec.json"
+PREFIXES = {"prov": str(PROV), "rec": str(REC), "qudt": str(QUDT), "dcat": str(DCAT)}
+CONTEXT = [REC_CONTEXT, {"prov": str(PROV), "qudt": str(QUDT), "dcat": str(DCAT)}]
 
 RUN_TYPES = (
     REC.QueuedRun,
@@ -35,7 +37,7 @@ class GraphObserver(BaseObserver):
     def __init__(self, run_id):
         self.run_id = str(run_id)
         self.graph = Graph()
-        for prefix, namespace in CONTEXT.items():
+        for prefix, namespace in PREFIXES.items():
             self.graph.bind(prefix, Namespace(namespace))
 
     @property
