@@ -3,5 +3,6 @@
 # Author: Vamsi Kalagaturu
 
 project = "REC"
-extensions = []
+extensions = ["sphinx.ext.autodoc"]
+autodoc_mock_imports = ["mariadb", "dotenv"]
 html_theme = "furo"

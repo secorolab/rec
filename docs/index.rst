@@ -9,3 +9,4 @@ to an archive file, MariaDB, or both.
 
    install
    tutorial
+   api
