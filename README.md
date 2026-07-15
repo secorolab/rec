@@ -1,7 +1,7 @@
 # Robot Execution Catalog (REC)
 
 [![Tests (Python 3.12 and 3.14)](https://github.com/secorolab/rec/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/secorolab/rec/actions/workflows/tests.yml)
-[![Documentation](https://github.com/secorolab/rec/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/secorolab/rec/actions/workflows/docs.yml)
+[![Documentation](https://github.com/secorolab/rec/actions/workflows/docs.yml/badge.svg?branch=main)](https://secoro.uni-bremen.de/rec/)
 
 REC records robot runs as JSON-LD provenance graphs. A run can be stored in a
 file, MariaDB, or both.

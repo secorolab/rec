@@ -35,6 +35,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - run: sudo apt-get update
+      - run: sudo apt-get install --yes libmariadb-dev
       - run: pip install -e ".[mariadb]" pytest
       - run: pytest -q
         env:
