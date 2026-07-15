@@ -2,6 +2,6 @@
 # SPDX-FileCopyrightText: 2026 SECORO AG (secoro.uni-bremen.de)
 # Author: Vamsi Kalagaturu
 
-from rec.run import Run
-
-__all__ = ["Run"]
+project = "REC"
+extensions = []
+html_theme = "furo"

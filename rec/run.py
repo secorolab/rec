@@ -1,8 +1,17 @@
+# SPDX-License-Identifier: MPL-2.0
+# SPDX-FileCopyrightText: 2026 SECORO AG (secoro.uni-bremen.de)
+# Author: Argentina Ortega
+
 import datetime
 import threading
 from typing import Sequence
+from uuid import uuid4
+
+from rdflib import Namespace
 
 from rec.observers.base import BaseObserver
+
+REC = Namespace("https://secorolab.github.io/metamodels/rec#")
 
 
 class IntervalTimer(threading.Thread):
@@ -21,49 +30,44 @@ class IntervalTimer(threading.Thread):
     def run(self):
         while not self.stopped.wait(self.interval):
             self.func()
-        self.func()
 
 
 class Run:
     def __init__(
         self,
-        observers: Sequence[BaseObserver] = [],
-        ingredients: list = [],
-        run_id: int = None,
-        scenario=None,
-        pre_run_hooks: list = [],
-        post_run_hooks: list = [],
-        **kwargs,
+        observers: Sequence[BaseObserver] = (),
+        run_id: str | None = None,
+        pre_run_hooks: list = None,
+        post_run_hooks: list = None,
     ):
         self._id = run_id
         self.observers = observers
-        self.ingredients = ingredients
+        file_observer = next((observer for observer in observers if hasattr(observer, "file_id") and hasattr(observer, "path")), None)
+        if file_observer is not None:
+            for observer in observers:
+                if hasattr(observer, "set_file_source"):
+                    observer.set_file_source(file_observer.file_id, file_observer.path)
         self.start_time = None
         self.end_time = None
         self.status = None
         self.result = None
-        self.pre_run_hooks = pre_run_hooks
-        self.post_run_hooks = post_run_hooks
+        self.pre_run_hooks = pre_run_hooks or []
+        self.post_run_hooks = post_run_hooks or []
 
-        self.heartbeat = None
         self.beat_interval = 10
 
     def _get_active_run(self):
         if self._id is not None:
-            # We start with a known ID, we probably don't need to do anything
-            pass
-        if self._id is None:
-            # First query the DB to see if there is any run marked as active.
-            _id = self.observers[0].query_active_run()
-            # If no run is marked as active, create one in the DB and return the ID
-            return _id
+            return self._id
+        if self.observers:
+            active_run = self.observers[0].query_active_run()
+            if active_run is not None:
+                return active_run
+        return f"run-{uuid4()}"
 
     def _stop_time(self):
-        self.stop_time = datetime.datetime.now(datetime.UTC)
-        elapsed_time = datetime.timedelta(
-            seconds=round((self.stop_time - self.start_time).total_seconds())
-        )
-        return elapsed_time
+        self.end_time = datetime.datetime.now(datetime.UTC)
+        return self.end_time
 
     def _start_heartbeat(self):
         if self.beat_interval > 0:
@@ -80,11 +84,8 @@ class Run:
 
     def _emit_heartbeat(self):
         beat_time = datetime.datetime.now(datetime.UTC)
-        print("Running....")
-
-        # Update info on observers
         for observer in self.observers:
-            observer.log_run_heartbeat(self._id, beat_time, result=self.result)
+            observer.log_run_heartbeat(beat_time, self.result)
 
     def _emit_cancelled(self):
         self.status = RunStatus.CANCELLED
@@ -92,70 +93,46 @@ class Run:
 
         # Update info on observers
         for observer in self.observers:
-            observer.log_cancelled_run(self._id, cancelled_time)
+            observer.log_cancelled_run(cancelled_time)
 
     def _emit_queued(self):
         self.status = RunStatus.QUEUED
-        queued_time = datetime.datetime.now(datetime.UTC)
-
-        # Update info on observers
         for observer in self.observers:
-            observer.log_queued_run(self._id, queued_time)
+            observer.log_queued_run(self._id)
 
-    def _emit_started(self, trigger=None, starter=None):
-        """
-        Records the metadata of the starting run
-        :param trigger: An entity that triggers the run
-        :param starter: The activity that generated the trigger
-        :return:
-        """
+    def _emit_started(self):
         self.status = RunStatus.RUNNING
         self._id = self._get_active_run()
         self.start_time = datetime.datetime.now(datetime.UTC)
 
-        # Update info on observers
         for observer in self.observers:
-            _id = observer.log_started_run(
-                self._id,
-                self.start_time,
-                trigger=trigger,
-                starter=starter,
-            )
-            if self._id is None:
-                self._id = _id
-                print("Starting run with ID {}".format(self._id))
+            _id = observer.log_started_run(self._id, self.start_time)
+            self._id = _id
 
     def _emit_completed(self):
         self.status = RunStatus.COMPLETED
-        elapsed_time = self._stop_time()
-        print("Completed after {}".format(elapsed_time))
-
-        # Update info on observers
+        completed_time = self._stop_time()
         for observer in self.observers:
-            observer.log_completed_run(self._id, self.stop_time)
+            observer.log_completed_run(completed_time)
 
     def _emit_interrupted(self):
         self.status = RunStatus.INTERRUPTED
-        elapsed_time = self._stop_time()
-
-        # Update info on observers
+        interrupted_time = self._stop_time()
         for observer in self.observers:
-            observer.log_interrupted_run(self._id, elapsed_time)
+            observer.log_interrupted_run(interrupted_time)
 
     def _emit_failed(self):
         self.status = RunStatus.FAILED
-        elapsed_time = self._stop_time()
-
-        # Update info on observers
+        failed_time = self._stop_time()
         for observer in self.observers:
-            observer.log_failed_run(self._id, elapsed_time)
+            observer.log_failed_run(failed_time)
 
     def _execute_hooks(self, hooks):
         for hook in hooks:
             hook()
 
     def main(self):
-        pass
+        raise NotImplementedError
 
     def run(self):
         """
@@ -168,14 +145,13 @@ class Run:
             self._start_heartbeat()
             self._execute_hooks(self.pre_run_hooks)
             self.result = self.main()
-            print("Result: {}".format(self.result))
             self._emit_completed()
             self._stop_heartbeat()
             self._execute_hooks(self.post_run_hooks)
-        except KeyboardInterrupt as k:
+        except KeyboardInterrupt:
             self._stop_heartbeat()
             self._emit_interrupted()
-        except Exception as ex:
+        except Exception:
             self._stop_heartbeat()
             self._emit_failed()
         finally:
@@ -185,51 +161,32 @@ class Run:
         return self.result
 
     def log_scalar(self, metric_name, value, step: int = None):
-        """Log a measurement at runtime
+        for observer in self.observers:
+            observer.log_scalar(metric_name, value, step)
 
-        :param metric_name: Name of the metric being logged
-        :param value: The measured value
-        :param step: Optional. Integer value representing the iteration number
-        :return:
-        """
-        pass
+    def log_sources(self, sources):
+        for observer in self.observers:
+            observer.log_sources(sources)
 
-    def log_sources(self):
-        """Log the source code files used to execute this run (e.g., file name/path, md5)
-        :return:
-        """
-        pass
+    def log_repositories(self, repositories):
+        for observer in self.observers:
+            observer.log_repositories(repositories)
 
-    def log_repositories(self):
-        """
-        Log the git information of the sources used in this run (url, commit/tag, uncommited changes)
-        :return:
-        """
-        pass
+    def log_dependencies(self, dependencies):
+        for observer in self.observers:
+            observer.log_dependencies(dependencies)
 
-    def log_dependencies(self):
-        """
-        Log the dependencies of the sources used in this run (e.g., package name, version)
-        :return:
-        """
-        pass
+    def log_host_info(self, host_info):
+        for observer in self.observers:
+            observer.log_host_info(host_info)
 
-    def log_host_info(self):
-        """
-        Log information about the machine executing this run (e.g., cpu, gpu, OS, user, hostname, python version and venv, env variables, etc.)
-        :return:
-        """
-        pass
+    def add_agent(self, agent_id: str, agent_type: str):
+        for observer in self.observers:
+            observer.add_agent(agent_id, agent_type)
 
-    def add_agent(self, agent_id: str, agent_type: str, **kwargs):
-        """
-        Add an agent (e.g., a robot) to the run
-        :param agent_id: A unique ID for this agent
-        :param agent_type: The type of agent being added, e.g., software agent, robot etc.
-        :param kwargs:
-        :return:
-        """
-        pass
+    def add_activity(self, activity_id: str, activity_type: str, associated_with=None):
+        for observer in self.observers:
+            observer.add_activity(activity_id, activity_type, associated_with)
 
     def add_resource(
         self,
@@ -237,7 +194,9 @@ class Run:
         usage_activity=None,
         usage_time=None,
         title=None,
-        **kwargs,
+        archive_path=None,
+        sha256=None,
+        size_bytes=None,
     ):
         """
         Add a resource to the run
@@ -254,6 +213,16 @@ class Run:
         """
         if usage_time is None:
             usage_time = datetime.datetime.now(datetime.UTC)
+        for observer in self.observers:
+            observer.add_resource(
+                filename,
+                used_by=usage_activity,
+                used_at=usage_time,
+                label=title,
+                archive_path=archive_path,
+                sha256=sha256,
+                size_bytes=size_bytes,
+            )
 
     def add_artefact(
         self,
@@ -261,7 +230,9 @@ class Run:
         gen_activity=None,
         generated_time=None,
         title=None,
-        **kwargs,
+        archive_path=None,
+        sha256=None,
+        size_bytes=None,
     ):
         """
         Add an artefact to the run
@@ -278,21 +249,35 @@ class Run:
         """
         if generated_time is None:
             generated_time = datetime.datetime.now(datetime.UTC)
+        for observer in self.observers:
+            observer.add_artefact(
+                filename,
+                generated_by=gen_activity,
+                generated_at=generated_time,
+                label=title,
+                archive_path=archive_path,
+                sha256=sha256,
+                size_bytes=size_bytes,
+            )
 
     def info(self):
         """Print out a summary of the run data
 
         :return:
         """
-        pass
+        return {
+            "id": self._id,
+            "status": self.status,
+            "start_time": self.start_time.isoformat() if self.start_time else None,
+            "end_time": self.end_time.isoformat() if self.end_time else None,
+            "result": self.result,
+        }
 
 
 class RunStatus:
-    RUNNING = "RUNNING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    INTERRUPTED = "INTERRUPTED"
-    CANCELLED = "CANCELLED"
-    QUEUED = "QUEUED"
-    TIMED_OUT = "TIMED_OUT"
-    DEAD = "DEAD"
+    QUEUED = REC.QueuedRun
+    RUNNING = REC.RunningRun
+    COMPLETED = REC.CompletedRun
+    FAILED = REC.FailedRun
+    INTERRUPTED = REC.InterruptedRun
+    CANCELLED = REC.CancelledRun
