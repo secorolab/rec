@@ -16,6 +16,28 @@ the run will be stored in MariaDB or archives will be synchronised there:
 
    pip install -e ".[mariadb]"
 
+Quick run
+---------
+
+Save this as ``quick_run.py`` and run ``python quick_run.py``. It creates a
+JSON-LD archive at ``runs/quick/rec.jsonld``:
+
+.. code-block:: python
+
+   from rec import Run
+   from rec.observers import FileObserver
+
+
+   class QuickRun(Run):
+       def main(self):
+           return "ok"
+
+
+   QuickRun(
+       observers=[FileObserver("runs/quick/rec.jsonld")],
+       run_id="quick",
+   ).run()
+
 MariaDB connection
 ------------------
 
