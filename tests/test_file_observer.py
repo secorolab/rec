@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from pyshacl import validate
-from rdflib import Graph, Namespace, RDF
+from rdflib import Graph, Literal, Namespace, RDF
 from rdflib.namespace import PROV
 
 from rec.observers import FileObserver
@@ -14,6 +14,7 @@ from rec.observers.graph_observer import REC_CONTEXT
 from rec.run import Run
 
 REC = Namespace("https://secorolab.github.io/metamodels/rec#")
+EXEC = Namespace("https://secorolab.github.io/metamodels/execution-context#")
 
 
 def recorded_graph(tmp_path):
@@ -39,13 +40,18 @@ def test_file_observer_writes_generic_provenance(tmp_path):
     path, graph = recorded_graph(tmp_path)
     run_node = REC["activity/run-1"]
     assert (run_node, RDF.type, PROV.Activity) in graph
+    assert (run_node, RDF.type, EXEC.ExecutionContext) in graph
     assert (run_node, RDF.type, REC.CompletedRun) in graph
     file_id = graph.value(run_node, REC["file-id"])
     assert file_id
-    assert (run_node, REC.status, None) not in graph
+    assert graph.value(run_node, REC.status) == Literal("COMPLETED")
     assert (None, PROV.qualifiedUsage, None) in graph
     assert (None, PROV.qualifiedGeneration, None) in graph
-    assert not any("execution-context#" in str(term) or "observation#" in str(term) or "/bdd#" in str(term) for triple in graph for term in triple)
+    assert not any(
+        "observation#" in str(term) or "/bdd#" in str(term)
+        for triple in graph
+        for term in triple
+    )
     assert FileObserver(path).file_id == str(file_id)
 
 
