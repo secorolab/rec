@@ -111,6 +111,31 @@ def test_host_info_is_collected_at_start(tmp_path):
     assert str(graph.value(host, REC.runtime)) == platform.python_version()
 
 
+def test_started_run_records_its_trigger_and_starter(tmp_path):
+    path = tmp_path / "rec.jsonld"
+    run = Run(observers=[FileObserver(path)], run_id="run-7")
+    run._emit_started(trigger="rec:entity/schedule", starter="rec:activity/scheduler")
+
+    graph = Graph().parse(path, format="json-ld")
+    activity = REC["activity/run-7"]
+    trigger = REC["entity/schedule"]
+    assert (activity, PROV.wasStartedBy, trigger) in graph
+    start = graph.value(activity, PROV.qualifiedStart)
+    assert (start, RDF.type, PROV.Start) in graph
+    assert graph.value(start, PROV.entity) == trigger
+    assert graph.value(start, PROV.hadActivity) == REC["activity/scheduler"]
+    assert graph.value(start, PROV.atTime) == graph.value(activity, PROV.startedAtTime)
+
+
+def test_started_run_without_trigger_is_unqualified(tmp_path):
+    path = tmp_path / "rec.jsonld"
+    run = Run(observers=[FileObserver(path)], run_id="run-8")
+    run._emit_started()
+
+    graph = Graph().parse(path, format="json-ld")
+    assert graph.value(REC["activity/run-8"], PROV.qualifiedStart) is None
+
+
 def test_cancelled_run_cannot_start(tmp_path):
     run = Run(observers=[FileObserver(tmp_path / "rec.jsonld")], run_id="run-3")
     run.queue()

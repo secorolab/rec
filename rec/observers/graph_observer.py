@@ -63,10 +63,12 @@ class GraphObserver(BaseObserver):
         self.graph.set((self.run, REC["queued-time"], _time(queued_time)))
         self._persist()
 
-    def log_started_run(self, run_id: str, started_time: datetime) -> str:
-        """Record the start time and return the canonical run ID."""
+    def log_started_run(self, run_id: str, started_time: datetime, trigger=None, starter=None) -> str:
+        """Record the start time, its optional trigger and starter, and return the run ID."""
         self._set_run(run_id, REC.RunningRun)
         self.graph.set((self.run, PROV.startedAtTime, _time(started_time)))
+        if trigger is not None or starter is not None:
+            self._start(trigger, starter, started_time)
         self._persist()
         return self.run_id
 
@@ -237,6 +239,22 @@ class GraphObserver(BaseObserver):
             self.graph.remove((self.run, RDF.type, state_type))
         self.graph.add((self.run, RDF.type, run_type))
         self.graph.set((self.run, REC["run-id"], Literal(self.run_id, datatype=XSD.string)))
+
+    def _start(self, trigger, starter, started_time):
+        """Qualify the run's start with the entity that triggered it and the activity behind it."""
+        start = REC[f"start/{_safe(self.run_id)}"]
+        self.graph.set((self.run, PROV.qualifiedStart, start))
+        self.graph.add((start, RDF.type, PROV.Start))
+        self.graph.set((start, PROV.atTime, _time(started_time)))
+        if trigger is not None:
+            entity = _iri(trigger)
+            self.graph.add((entity, RDF.type, PROV.Entity))
+            self.graph.set((self.run, PROV.wasStartedBy, entity))
+            self.graph.set((start, PROV.entity, entity))
+        if starter is not None:
+            activity = _iri(starter)
+            self.graph.add((activity, RDF.type, PROV.Activity))
+            self.graph.set((start, PROV.hadActivity, activity))
 
     def _finish(self, run_type, ended_at, fail_trace=None):
         self._set_run(None, run_type)

@@ -140,13 +140,15 @@ class Run:
         for observer in self.observers:
             observer.log_queued_run(self._id, queued_time)
 
-    def _emit_started(self):
+    def _emit_started(self, trigger=None, starter=None):
+        """Record the run as started, optionally with the PROV entity that triggered it
+        and the activity that generated that trigger."""
         self.status = RunStatus.RUNNING
         self._id = self._get_active_run()
         self.start_time = datetime.datetime.now(datetime.UTC)
 
         for observer in self.observers:
-            _id = observer.log_started_run(self._id, self.start_time)
+            _id = observer.log_started_run(self._id, self.start_time, trigger, starter)
             self._id = _id
         logger.info("Starting run %s", self._id)
         self.log_host_info(host_info())
@@ -202,13 +204,18 @@ class Run:
         """
         raise NotImplementedError
 
-    def run(self):
-        """Run ``main`` and record completion, failure, or interruption."""
+    def run(self, trigger=None, starter=None):
+        """Run ``main`` and record completion, failure, or interruption.
+
+        Args:
+            trigger: Entity whose creation started this run.
+            starter: Activity that generated the trigger.
+        """
         if self.status is RunStatus.CANCELLED:
             raise RuntimeError("cannot start a cancelled run")
 
         try:
-            self._emit_started()
+            self._emit_started(trigger, starter)
             self._start_heartbeat()
             self._execute_hooks(self.pre_run_hooks)
             self.result = self.main()

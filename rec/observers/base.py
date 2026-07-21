@@ -15,7 +15,7 @@ class BaseObserver:
     def log_queued_run(self, run_id: str, queued_time: datetime):
         raise NotImplementedError
 
-    def log_started_run(self, run_id: str, started_time: datetime) -> str:
+    def log_started_run(self, run_id: str, started_time: datetime, trigger=None, starter=None) -> str:
         raise NotImplementedError
 
     def log_completed_run(self, completed_time: datetime):
