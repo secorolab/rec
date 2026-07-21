@@ -40,11 +40,10 @@ def test_file_observer_writes_generic_provenance(tmp_path):
     path, graph = recorded_graph(tmp_path)
     run_node = REC["activity/run-1"]
     assert (run_node, RDF.type, PROV.Activity) in graph
-    assert (run_node, RDF.type, EXEC.ExecutionContext) in graph
     assert (run_node, RDF.type, REC.CompletedRun) in graph
-    file_id = graph.value(run_node, REC["file-id"])
-    assert file_id
-    assert graph.value(run_node, REC.status) == Literal("COMPLETED")
+    location = graph.value(run_node, PROV.atLocation)
+    assert (location, RDF.type, REC.PathLocation) in graph
+    assert str(graph.value(location, REC.path)).endswith("rec.jsonld")
     assert (None, PROV.qualifiedUsage, None) in graph
     assert (None, PROV.qualifiedGeneration, None) in graph
     assert not any(
@@ -52,7 +51,7 @@ def test_file_observer_writes_generic_provenance(tmp_path):
         for triple in graph
         for term in triple
     )
-    assert FileObserver(path).file_id == str(file_id)
+    assert FileObserver(path).run_id == "run-1"
 
 
 def test_file_observer_conforms_to_rec_metamodel(tmp_path):

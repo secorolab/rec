@@ -31,7 +31,6 @@ class MariaDBObserver(GraphObserver):
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
             raise ValueError("table must be a simple SQL identifier")
         self.table = table
-        self.file_id = None
         self.archive_path = None
         load_dotenv()
         self.conn = mariadb.connect(
@@ -53,12 +52,11 @@ class MariaDBObserver(GraphObserver):
         self.file_sources_table = f"{self.table}_file_sources"
         self.cursor.execute(
             f"CREATE TABLE IF NOT EXISTS {self.file_sources_table} ("
-            "file_id VARCHAR(255) PRIMARY KEY, "
-            "run_id VARCHAR(255) NOT NULL, "
+            "run_id VARCHAR(255) PRIMARY KEY, "
             "archive_path TEXT NOT NULL, "
             "started_at DATETIME(6) NOT NULL, "
             "synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
-            "INDEX (run_id), INDEX (started_at))"
+            "INDEX (started_at))"
         )
         super().__init__(run_id or self._active_run_id() or f"run-{uuid4()}")
         self._load_existing()
@@ -82,17 +80,16 @@ class MariaDBObserver(GraphObserver):
             self.graph.parse(io.StringIO(row[0]), format="json-ld")
 
     def _persist(self):
-        if self.file_id is not None:
-            self.graph.set((self.run, REC["file-id"], Literal(self.file_id, datatype=XSD.string)))
+        if self.archive_path is not None:
+            self._set_location(self.archive_path)
         self._upsert(self.run_id, self.graph)
-        if self.file_id is not None:
+        if self.archive_path is not None:
             started_at = self.graph.value(self.run, PROV.startedAtTime)
             if started_at is not None:
-                self._upsert_file_source(self.file_id, self.run_id, self.archive_path, started_at.toPython())
+                self._upsert_file_source(self.run_id, self.archive_path, started_at.toPython())
 
-    def set_file_source(self, file_id, archive_path):
+    def set_file_source(self, archive_path):
         """Associate this live database run with its file-backed source."""
-        self.file_id = file_id
         self.archive_path = str(archive_path)
 
     def sync_file(self, path):
@@ -102,12 +99,11 @@ class MariaDBObserver(GraphObserver):
         if run is None:
             raise ValueError("file has no rec:run-id")
         run_id = str(graph.value(run, REC["run-id"]))
-        file_id = graph.value(run, REC["file-id"])
         started_at = graph.value(run, PROV.startedAtTime)
-        if file_id is None or started_at is None:
-            raise ValueError("file has no rec:file-id or prov:startedAtTime")
+        if started_at is None:
+            raise ValueError("file has no prov:startedAtTime")
         self._upsert(run_id, graph)
-        self._upsert_file_source(str(file_id), run_id, path, started_at.toPython())
+        self._upsert_file_source(run_id, path, started_at.toPython())
 
     def sync_files(self, directory, started_after=None):
         """Import archive files in start-time order, optionally after a cursor."""
@@ -134,12 +130,12 @@ class MariaDBObserver(GraphObserver):
             (run_id, status, graph.serialize(format="json-ld", context=CONTEXT, auto_compact=True)),
         )
 
-    def _upsert_file_source(self, file_id, run_id, archive_path, started_at):
+    def _upsert_file_source(self, run_id, archive_path, started_at):
         self.cursor.execute(
-            f"INSERT INTO {self.file_sources_table} (file_id, run_id, archive_path, started_at) "
-            "VALUES (?, ?, ?, ?) "
-            "ON DUPLICATE KEY UPDATE run_id = VALUES(run_id), archive_path = VALUES(archive_path), started_at = VALUES(started_at)",
-            (file_id, run_id, str(archive_path), started_at),
+            f"INSERT INTO {self.file_sources_table} (run_id, archive_path, started_at) "
+            "VALUES (?, ?, ?) "
+            "ON DUPLICATE KEY UPDATE archive_path = VALUES(archive_path), started_at = VALUES(started_at)",
+            (run_id, str(archive_path), started_at),
         )
 
     def close(self):

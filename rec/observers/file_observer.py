@@ -5,10 +5,6 @@
 """File-backed REC graph observer."""
 
 from pathlib import Path
-from uuid import uuid4
-
-from rdflib import Literal
-from rdflib.namespace import XSD
 
 from rec.observers.graph_observer import GraphObserver, REC
 
@@ -18,10 +14,9 @@ class FileObserver(GraphObserver):
 
     Args:
         path: Archive file to create or reopen.
-        file_id: Stable archive identity. Generated for a new archive.
     """
 
-    def __init__(self, path, file_id=None):
+    def __init__(self, path):
         self.path = Path(path)
         super().__init__("unbound")
         if self.path.exists():
@@ -30,15 +25,9 @@ class FileObserver(GraphObserver):
             if run is None:
                 raise ValueError("existing file has no rec:run-id")
             self.run_id = str(self.graph.value(run, REC["run-id"]))
-            file_id = self.graph.value(run, REC["file-id"])
-            if file_id is None:
-                raise ValueError("existing file has no rec:file-id")
-            self.file_id = str(file_id)
-        else:
-            self.file_id = file_id or f"file-{uuid4()}"
 
     def _persist(self):
-        self.graph.set((self.run, REC["file-id"], Literal(self.file_id, datatype=XSD.string)))
+        self._set_location(self.path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary.write_text(self.serialize() + "\n")

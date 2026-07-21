@@ -13,7 +13,6 @@ from rdflib.namespace import PROV, RDF, XSD
 from rec.observers.base import BaseObserver
 
 REC = Namespace("https://secorolab.github.io/metamodels/rec#")
-EXEC = Namespace("https://secorolab.github.io/metamodels/execution-context#")
 QUDT = Namespace("http://qudt.org/schema/qudt/")
 QK = Namespace("http://qudt.org/vocab/quantitykind/")
 UNIT = Namespace("http://qudt.org/vocab/unit/")
@@ -30,7 +29,6 @@ RUN_TYPES = (
     REC.InterruptedRun,
     REC.CancelledRun,
 )
-RUN_STATUS = {run_type: str(run_type).removeprefix(str(REC)).removesuffix("Run").upper() for run_type in RUN_TYPES}
 
 
 class GraphObserver(BaseObserver):
@@ -208,17 +206,23 @@ class GraphObserver(BaseObserver):
         if run_id is not None:
             self.run_id = str(run_id)
         self.graph.add((self.run, RDF.type, PROV.Activity))
-        self.graph.add((self.run, RDF.type, EXEC.ExecutionContext))
         for state_type in RUN_TYPES:
             self.graph.remove((self.run, RDF.type, state_type))
         self.graph.add((self.run, RDF.type, run_type))
         self.graph.set((self.run, REC["run-id"], Literal(self.run_id, datatype=XSD.string)))
-        self.graph.set((self.run, REC.status, Literal(RUN_STATUS[run_type], datatype=XSD.string)))
 
     def _finish(self, run_type, ended_at):
         self._set_run(None, run_type)
         self.graph.set((self.run, PROV.endedAtTime, _time(ended_at)))
         self._persist()
+
+    def _set_location(self, path):
+        """Record where this run's archive lives, as a rec:PathLocation."""
+        loc = REC[f"location/{_safe(self.run_id)}"]
+        self.graph.set((self.run, PROV.atLocation, loc))
+        self.graph.add((loc, RDF.type, PROV.Location))
+        self.graph.add((loc, RDF.type, REC.PathLocation))
+        self._literal(loc, REC.path, _location(path))
 
     def _entity(self, path, collection, label, sha256, size_bytes, archive_path=None, extra_type=None):
         location = archive_path or path

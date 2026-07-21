@@ -51,11 +51,11 @@ class Run:
     ):
         self._id = run_id
         self.observers = observers
-        file_observer = next((observer for observer in observers if hasattr(observer, "file_id") and hasattr(observer, "path")), None)
+        file_observer = next((observer for observer in observers if hasattr(observer, "path")), None)
         if file_observer is not None:
             for observer in observers:
                 if hasattr(observer, "set_file_source"):
-                    observer.set_file_source(file_observer.file_id, file_observer.path)
+                    observer.set_file_source(file_observer.path)
         self.start_time = None
         self.end_time = None
         self.status = None

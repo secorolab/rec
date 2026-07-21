@@ -10,7 +10,7 @@ from uuid import uuid4
 
 import pytest
 from rdflib import Graph
-from rdflib.namespace import RDF
+from rdflib.namespace import PROV, RDF
 
 from rec.observers import FileObserver, MariaDBObserver
 from rec.observers.graph_observer import REC
@@ -62,10 +62,10 @@ def test_mariadb_only_run(database):
     graph = stored_graph(observer, "db-only")
     node = REC["activity/db-only"]
     assert (node, RDF.type, REC.CompletedRun) in graph
-    assert graph.value(node, REC["file-id"]) is None
+    assert graph.value(node, PROV.atLocation) is None
 
 
-def test_file_and_mariadb_share_file_id(database, tmp_path):
+def test_file_and_mariadb_share_the_archive_location(database, tmp_path):
     path = tmp_path / "run.jsonld"
     db = database()
     file = FileObserver(path)
@@ -75,12 +75,12 @@ def test_file_and_mariadb_share_file_id(database, tmp_path):
 
     graph = stored_graph(db, "both")
     node = REC["activity/both"]
-    assert str(graph.value(node, REC["file-id"])) == file.file_id
-    db.cursor.execute(f"SELECT file_id, archive_path FROM {db.file_sources_table} WHERE run_id = ?", ("both",))
-    assert db.cursor.fetchone() == (file.file_id, str(path))
+    assert str(graph.value(graph.value(node, PROV.atLocation), REC.path)).endswith("run.jsonld")
+    db.cursor.execute(f"SELECT run_id, archive_path FROM {db.file_sources_table} WHERE run_id = ?", ("both",))
+    assert db.cursor.fetchone() == ("both", str(path))
 
 
-def test_sync_file_preserves_file_identity(database, tmp_path):
+def test_sync_file_preserves_the_archive_location(database, tmp_path):
     path = tmp_path / "run.jsonld"
     file = file_run(path, "file-only", datetime(2026, 1, 1, tzinfo=UTC))
     db = database()
@@ -89,7 +89,7 @@ def test_sync_file_preserves_file_identity(database, tmp_path):
 
     graph = stored_graph(db, "file-only")
     node = REC["activity/file-only"]
-    assert str(graph.value(node, REC["file-id"])) == file.file_id
+    assert str(graph.value(graph.value(node, PROV.atLocation), REC.path)).endswith("run.jsonld")
 
 
 def test_sync_files_uses_started_at_time_order_and_cursor(database, tmp_path):
@@ -103,5 +103,5 @@ def test_sync_files_uses_started_at_time_order_and_cursor(database, tmp_path):
     assert db.sync_files(tmp_path) == 2
     assert synced == ["early.jsonld", "late.jsonld"]
     assert db.sync_files(tmp_path, started_after=datetime(2026, 1, 1, 12, tzinfo=UTC)) == 1
-    db.cursor.execute(f"SELECT file_id FROM {db.file_sources_table} ORDER BY started_at")
-    assert [row[0] for row in db.cursor] == [early.file_id, late.file_id]
+    db.cursor.execute(f"SELECT run_id FROM {db.file_sources_table} ORDER BY started_at")
+    assert [row[0] for row in db.cursor] == [early.run_id, late.run_id]
