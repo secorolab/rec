@@ -8,8 +8,7 @@ description = "Robot Execution Catalog (REC) is a python library to manage data 
 dynamic = ["version"]
 dependencies = [
     "click>=8.1.7",
-    "dotenv",
-    "mariadb"
+    "rdflib"
 ]
 requires-python = ">= 3.12"
 readme = "README.md"
@@ -18,8 +17,9 @@ maintainers = [
 ]
 
 [project.optional-dependencies]
-dev = ["black>=24.4.2"]
+dev = ["black>=24.4.2", "pytest", "pyshacl"]
+mariadb = ["mariadb", "python-dotenv"]
+docs = ["sphinx", "furo"]
 
 [tool.setuptools.packages.find]
 where = ["."]  # list of folders that contain the packages (["."] by default)
-

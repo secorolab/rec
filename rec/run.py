@@ -1,8 +1,23 @@
+# SPDX-License-Identifier: MPL-2.0
+# SPDX-FileCopyrightText: 2026 SECORO AG (secoro.uni-bremen.de)
+# Author: Argentina Ortega
+
 import datetime
+import logging
+import platform
+import socket
 import threading
+import traceback
 from typing import Sequence
+from uuid import uuid4
+
+from rdflib import Namespace
 
 from rec.observers.base import BaseObserver
+
+REC = Namespace("https://secorolab.github.io/metamodels/rec#")
+
+logger = logging.getLogger(__name__)
 
 
 class IntervalTimer(threading.Thread):
@@ -21,49 +36,74 @@ class IntervalTimer(threading.Thread):
     def run(self):
         while not self.stopped.wait(self.interval):
             self.func()
-        self.func()
+
+
+def _fail_trace(error):
+    return "".join(traceback.format_exception(error)) if error is not None else None
+
+
+def host_info():
+    """Return this machine's hostname, operating system, runtime, and CPU."""
+    return {
+        "hostname": socket.gethostname(),
+        "os": platform.platform(),
+        "python": platform.python_version(),
+        "cpu": platform.processor() or None,
+    }
 
 
 class Run:
+    """Coordinate one execution and forward its provenance to observers.
+
+    Args:
+        observers: Storage backends that receive every run event.
+        run_id: Canonical REC run identifier. A UUID-based ID is generated when omitted.
+        pre_run_hooks: Callables run after the run starts.
+        post_run_hooks: Callables run after successful completion.
+    """
+
     def __init__(
         self,
-        observers: Sequence[BaseObserver] = [],
-        ingredients: list = [],
-        run_id: int = None,
-        scenario=None,
-        pre_run_hooks: list = [],
-        post_run_hooks: list = [],
-        **kwargs,
+        observers: Sequence[BaseObserver] = (),
+        run_id: str | None = None,
+        pre_run_hooks: list = None,
+        post_run_hooks: list = None,
     ):
         self._id = run_id
         self.observers = observers
-        self.ingredients = ingredients
+        file_observer = next((observer for observer in observers if hasattr(observer, "path")), None)
+        if file_observer is not None:
+            for observer in observers:
+                if hasattr(observer, "set_file_source"):
+                    observer.set_file_source(file_observer.path)
         self.start_time = None
         self.end_time = None
         self.status = None
         self.result = None
-        self.pre_run_hooks = pre_run_hooks
-        self.post_run_hooks = post_run_hooks
+        self.pre_run_hooks = pre_run_hooks or []
+        self.post_run_hooks = post_run_hooks or []
 
-        self.heartbeat = None
         self.beat_interval = 10
+        self._heartbeat = None
 
     def _get_active_run(self):
         if self._id is not None:
-            # We start with a known ID, we probably don't need to do anything
-            pass
-        if self._id is None:
-            # First query the DB to see if there is any run marked as active.
-            _id = self.observers[0].query_active_run()
-            # If no run is marked as active, create one in the DB and return the ID
-            return _id
+            return self._id
+        if self.observers:
+            active_run = self.observers[0].query_active_run()
+            if active_run is not None:
+                return active_run
+        return f"run-{uuid4()}"
 
     def _stop_time(self):
-        self.stop_time = datetime.datetime.now(datetime.UTC)
-        elapsed_time = datetime.timedelta(
-            seconds=round((self.stop_time - self.start_time).total_seconds())
-        )
-        return elapsed_time
+        self.end_time = datetime.datetime.now(datetime.UTC)
+        return self.end_time
+
+    def elapsed_time(self):
+        """Return how long the run has been going, or ``None`` before it starts."""
+        if self.start_time is None:
+            return None
+        return (self.end_time or datetime.datetime.now(datetime.UTC)) - self.start_time
 
     def _start_heartbeat(self):
         if self.beat_interval > 0:
@@ -80,104 +120,114 @@ class Run:
 
     def _emit_heartbeat(self):
         beat_time = datetime.datetime.now(datetime.UTC)
-        print("Running....")
-
-        # Update info on observers
+        logger.debug("Run %s still running, result so far: %s", self._id, self.result)
         for observer in self.observers:
-            observer.log_run_heartbeat(self._id, beat_time, result=self.result)
+            observer.log_run_heartbeat(beat_time, self.result)
 
     def _emit_cancelled(self):
         self.status = RunStatus.CANCELLED
-        cancelled_time = datetime.datetime.now(datetime.UTC)
+        cancelled_time = self._stop_time()
+        logger.info("Cancelled run %s", self._id)
 
         # Update info on observers
         for observer in self.observers:
-            observer.log_cancelled_run(self._id, cancelled_time)
+            observer.log_cancelled_run(cancelled_time)
 
     def _emit_queued(self):
         self.status = RunStatus.QUEUED
         queued_time = datetime.datetime.now(datetime.UTC)
-
-        # Update info on observers
+        logger.info("Queued run %s", self._id)
         for observer in self.observers:
             observer.log_queued_run(self._id, queued_time)
 
     def _emit_started(self, trigger=None, starter=None):
-        """
-        Records the metadata of the starting run
-        :param trigger: An entity that triggers the run
-        :param starter: The activity that generated the trigger
-        :return:
-        """
+        """Record the run as started, optionally with the PROV entity that triggered it
+        and the activity that generated that trigger."""
         self.status = RunStatus.RUNNING
         self._id = self._get_active_run()
         self.start_time = datetime.datetime.now(datetime.UTC)
 
-        # Update info on observers
         for observer in self.observers:
-            _id = observer.log_started_run(
-                self._id,
-                self.start_time,
-                trigger=trigger,
-                starter=starter,
-            )
-            if self._id is None:
-                self._id = _id
-                print("Starting run with ID {}".format(self._id))
+            _id = observer.log_started_run(self._id, self.start_time, trigger, starter)
+            self._id = _id
+        logger.info("Starting run %s", self._id)
+        self.log_host_info(host_info())
 
     def _emit_completed(self):
         self.status = RunStatus.COMPLETED
-        elapsed_time = self._stop_time()
-        print("Completed after {}".format(elapsed_time))
-
-        # Update info on observers
+        completed_time = self._stop_time()
+        logger.info("Completed run %s after %s, result: %s", self._id, self.elapsed_time(), self.result)
         for observer in self.observers:
-            observer.log_completed_run(self._id, self.stop_time)
+            observer.log_completed_run(completed_time)
 
-    def _emit_interrupted(self):
+    def _emit_interrupted(self, error=None):
         self.status = RunStatus.INTERRUPTED
-        elapsed_time = self._stop_time()
-
-        # Update info on observers
+        interrupted_time = self._stop_time()
+        logger.warning("Interrupted run %s after %s", self._id, self.elapsed_time())
         for observer in self.observers:
-            observer.log_interrupted_run(self._id, elapsed_time)
+            observer.log_interrupted_run(interrupted_time, _fail_trace(error))
 
-    def _emit_failed(self):
+    def _emit_failed(self, error=None):
         self.status = RunStatus.FAILED
-        elapsed_time = self._stop_time()
-
-        # Update info on observers
+        failed_time = self._stop_time()
+        logger.error("Failed run %s after %s", self._id, self.elapsed_time(), exc_info=error)
         for observer in self.observers:
-            observer.log_failed_run(self._id, elapsed_time)
+            observer.log_failed_run(failed_time, _fail_trace(error))
 
     def _execute_hooks(self, hooks):
         for hook in hooks:
             hook()
 
-    def main(self):
-        pass
+    def queue(self):
+        """Record this run as queued, before :meth:`run` starts it."""
+        if self.status is not None:
+            raise RuntimeError(f"cannot queue a run with status {self.status}")
+        self._id = self._id or f"run-{uuid4()}"
+        self._emit_queued()
+        return self._id
 
-    def run(self):
+    def cancel(self):
+        """Cancel a queued run before it starts.
+
+        A run stopped while already running is interrupted, not cancelled.
         """
-        A centralized runner can start and complete a run. Decentralized runners should not use this method.
-        :return:
+        if self.status is not RunStatus.QUEUED:
+            raise RuntimeError(f"only a queued run can be cancelled, not {self.status}")
+        self._emit_cancelled()
+        for observer in self.observers:
+            observer.close()
+
+    def main(self):
+        """Execute the work represented by this run.
+
+        Subclasses override this method and return their result.
         """
+        raise NotImplementedError
+
+    def run(self, trigger=None, starter=None):
+        """Run ``main`` and record completion, failure, or interruption.
+
+        Args:
+            trigger: Entity whose creation started this run.
+            starter: Activity that generated the trigger.
+        """
+        if self.status is RunStatus.CANCELLED:
+            raise RuntimeError("cannot start a cancelled run")
 
         try:
-            self._emit_started()
+            self._emit_started(trigger, starter)
             self._start_heartbeat()
             self._execute_hooks(self.pre_run_hooks)
             self.result = self.main()
-            print("Result: {}".format(self.result))
             self._emit_completed()
             self._stop_heartbeat()
             self._execute_hooks(self.post_run_hooks)
-        except KeyboardInterrupt as k:
+        except KeyboardInterrupt as interrupt:
             self._stop_heartbeat()
-            self._emit_interrupted()
-        except Exception as ex:
+            self._emit_interrupted(interrupt)
+        except Exception as error:
             self._stop_heartbeat()
-            self._emit_failed()
+            self._emit_failed(error)
         finally:
             for observer in self.observers:
                 observer.close()
@@ -185,51 +235,39 @@ class Run:
         return self.result
 
     def log_scalar(self, metric_name, value, step: int = None):
-        """Log a measurement at runtime
+        """Record a dimensionless scalar metric, optionally at a step."""
+        for observer in self.observers:
+            observer.log_scalar(metric_name, value, step)
 
-        :param metric_name: Name of the metric being logged
-        :param value: The measured value
-        :param step: Optional. Integer value representing the iteration number
-        :return:
-        """
-        pass
+    def log_sources(self, sources):
+        """Record source-file metadata rows containing at least a ``path``."""
+        for observer in self.observers:
+            observer.log_sources(sources)
 
-    def log_sources(self):
-        """Log the source code files used to execute this run (e.g., file name/path, md5)
-        :return:
-        """
-        pass
+    def log_repositories(self, repositories):
+        """Record repository metadata rows such as name, URL, and revision."""
+        for observer in self.observers:
+            observer.log_repositories(repositories)
 
-    def log_repositories(self):
-        """
-        Log the git information of the sources used in this run (url, commit/tag, uncommited changes)
-        :return:
-        """
-        pass
+    def log_dependencies(self, dependencies):
+        """Record dependency metadata rows with a name and optional version."""
+        for observer in self.observers:
+            observer.log_dependencies(dependencies)
 
-    def log_dependencies(self):
-        """
-        Log the dependencies of the sources used in this run (e.g., package name, version)
-        :return:
-        """
-        pass
+    def log_host_info(self, host_info):
+        """Record host metadata such as hostname, operating system, and runtime."""
+        for observer in self.observers:
+            observer.log_host_info(host_info)
 
-    def log_host_info(self):
-        """
-        Log information about the machine executing this run (e.g., cpu, gpu, OS, user, hostname, python version and venv, env variables, etc.)
-        :return:
-        """
-        pass
+    def add_agent(self, agent_id: str, agent_type: str):
+        """Add a PROV agent with the supplied identifier and RDF type."""
+        for observer in self.observers:
+            observer.add_agent(agent_id, agent_type)
 
-    def add_agent(self, agent_id: str, agent_type: str, **kwargs):
-        """
-        Add an agent (e.g., a robot) to the run
-        :param agent_id: A unique ID for this agent
-        :param agent_type: The type of agent being added, e.g., software agent, robot etc.
-        :param kwargs:
-        :return:
-        """
-        pass
+    def add_activity(self, activity_id: str, activity_type: str, associated_with=None):
+        """Add a PROV activity and optionally associate it with an agent."""
+        for observer in self.observers:
+            observer.add_activity(activity_id, activity_type, associated_with)
 
     def add_resource(
         self,
@@ -237,23 +275,23 @@ class Run:
         usage_activity=None,
         usage_time=None,
         title=None,
-        **kwargs,
+        archive_path=None,
+        sha256=None,
+        size_bytes=None,
     ):
-        """
-        Add a resource to the run
-
-        This method only records the filename and minimal metadata.
-        If you need to process file contents in some way, use a Feature.
-
-        :param filename: The file path of the resource
-        :param usage_activity: The activity that uses this resource. Default: This run
-        :param usage_time: The time this resource is used by the activity.
-        :param title: A short title for the resource. Default: The file name
-        :param kwargs:
-        :return:
-        """
+        """Record a resource used by an activity, including optional file metadata."""
         if usage_time is None:
             usage_time = datetime.datetime.now(datetime.UTC)
+        for observer in self.observers:
+            observer.add_resource(
+                filename,
+                used_by=usage_activity,
+                used_at=usage_time,
+                label=title,
+                archive_path=archive_path,
+                sha256=sha256,
+                size_bytes=size_bytes,
+            )
 
     def add_artefact(
         self,
@@ -261,38 +299,40 @@ class Run:
         gen_activity=None,
         generated_time=None,
         title=None,
-        **kwargs,
+        archive_path=None,
+        sha256=None,
+        size_bytes=None,
     ):
-        """
-        Add an artefact to the run
-
-        This method only records the filename and minimal metadata.
-        If you need to process file contents in some way, use a Feature.
-
-        :param filename: he file path of the generated artefact
-        :param gen_activity: The generating activity. Default: This run
-        :param generated_time: The time the artefact was generated
-        :param title: A short title for the generated artefact
-        :param kwargs:
-        :return:
-        """
+        """Record an artefact generated by an activity, with optional file metadata."""
         if generated_time is None:
             generated_time = datetime.datetime.now(datetime.UTC)
+        for observer in self.observers:
+            observer.add_artefact(
+                filename,
+                generated_by=gen_activity,
+                generated_at=generated_time,
+                label=title,
+                archive_path=archive_path,
+                sha256=sha256,
+                size_bytes=size_bytes,
+            )
 
     def info(self):
-        """Print out a summary of the run data
-
-        :return:
-        """
-        pass
+        """Return the run ID, lifecycle type, timestamps, and result."""
+        return {
+            "id": self._id,
+            "status": self.status,
+            "start_time": self.start_time.isoformat() if self.start_time else None,
+            "end_time": self.end_time.isoformat() if self.end_time else None,
+            "result": self.result,
+        }
 
 
 class RunStatus:
-    RUNNING = "RUNNING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    INTERRUPTED = "INTERRUPTED"
-    CANCELLED = "CANCELLED"
-    QUEUED = "QUEUED"
-    TIMED_OUT = "TIMED_OUT"
-    DEAD = "DEAD"
+    """REC lifecycle RDF types exposed by :attr:`Run.status`."""
+    QUEUED = REC.QueuedRun
+    RUNNING = REC.RunningRun
+    COMPLETED = REC.CompletedRun
+    FAILED = REC.FailedRun
+    INTERRUPTED = REC.InterruptedRun
+    CANCELLED = REC.CancelledRun

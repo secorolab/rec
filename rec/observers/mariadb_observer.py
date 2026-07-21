@@ -1,229 +1,160 @@
-import sys
+# SPDX-License-Identifier: MPL-2.0
+# SPDX-FileCopyrightText: 2026 SECORO AG (secoro.uni-bremen.de)
+# Author: Argentina Ortega
+
+"""MariaDB-backed REC graph observer."""
+
+import io
 import os
-import json
-import datetime as dt
-from datetime import timedelta, datetime
+import re
+from pathlib import Path
+from uuid import uuid4
 
 import mariadb
-
 from dotenv import load_dotenv
+from rdflib import Graph, Literal
+from rdflib.namespace import PROV, RDF, XSD
 
-from rec.observers.base import BaseObserver
+from rec.observers.graph_observer import CONTEXT, GraphObserver, REC
 
 
-class MariaDBObserver(BaseObserver):
-    def __init__(self, db_name="logbook", table="logs", **kwargs):
-        """
-        Observer in a run that writes to a MariaDB database
+class MariaDBObserver(GraphObserver):
+    """Persist REC JSON-LD in MariaDB and import file archives.
 
-        :param db_name: Name of the table
-        :param kwargs:
-        """
+    Args:
+        run_id: Existing run to reopen, or an ID generated for a new run.
+        db_name: Database selected from the configured MariaDB server.
+        table: Base table name for runs and file-source mappings.
 
-        self.db_name = db_name
+    Attributes:
+        db_id: Short sequential number this database gave the run, for display
+            and ordering. The canonical identity stays ``rec:run-id``, which is
+            portable across databases as ``db_id`` is not. Archives synchronised
+            with :meth:`sync_files` are numbered in start-time order.
+    """
+
+    def __init__(self, run_id=None, db_name="logbook", table="runs"):
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
+            raise ValueError("table must be a simple SQL identifier")
         self.table = table
-
+        self.archive_path = None
+        self.db_id = None
         load_dotenv()
-
-        # Connect to MariaDB Platform
-        try:
-            self.conn = mariadb.connect(
-                user=os.getenv("MARIADB_USER"),
-                password=os.getenv("MARIADB_PASSWORD"),
-                host=os.getenv("MARIADB_HOST"),
-                port=int(os.getenv("MARIADB_PORT")),
-                database=db_name,
-            )
-            self.conn.autocommit = True  # optional for simplicity
-        except mariadb.Error as e:
-            print(f"Error connecting to MariaDB Platform: {e}")
-            sys.exit(1)
-
-        # Get Cursor
+        self.conn = mariadb.connect(
+            user=os.getenv("MARIADB_USER"),
+            password=os.getenv("MARIADB_PASSWORD"),
+            host=os.getenv("MARIADB_HOST"),
+            port=int(os.getenv("MARIADB_PORT", "3306")),
+            database=db_name,
+        )
+        self.conn.autocommit = True
         self.cursor = self.conn.cursor()
-        print(f"Connected to MariaDB Platform: {self.db_name}")
-
-        # Create the table if it doesn't exist
-        try:
-            self.cursor.execute(
-                f"""
-                CREATE TABLE IF NOT EXISTS {self.table} (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    status VARCHAR(20) NOT NULL,
-                    scenario_id VARCHAR(20),
-                    host_info JSON,
-                    sources JSON,
-                    repositories JSON,
-                    dependencies JSON,
-                    metrics JSON,
-                    agents JSON,
-                    resources JSON,
-                    artefacts JSON,
-                    run_info JSON,
-                    data JSON
-                )
-            """
-            )
-            print(f"Table '{self.table}' created or already exists.")
-        except mariadb.Error as e:
-            print(f"Error creating table: {e}")
-            self.conn.rollback()  # Rollback in case of DDL error
-
-        # self.cursor.execute("DESCRIBE logs;")
-        # for x in self.cursor:
-        #     print(x)
-
-    def add_run(
-        self, status: str, start_t: datetime = None, queue_t: datetime = None
-    ) -> int:
-        """
-        Saves a new run to the MariaDB database
-        :param status: The status of the run being added (RUNNING or QUEUED)
-        :param start_t: The start time of the run
-        :param queue_t: The queue time of the run
-        :return: The run_id
-        """
-        if start_t is not None:
-            assert status == "RUNNING"
-            run_info = {"start_time": start_t.isoformat()}
-        elif queue_t is not None:
-            assert status == "QUEUED"
-            run_info = {"queue_time": queue_t.isoformat()}
-        template = f"INSERT INTO {self.table} (status, run_info) VALUES (?, ?);"
-        try:
-            self.cursor.execute(template, (status, json.dumps(run_info)))
-            # print(f"Inserted {self.cursor.rowcount} rows.")
-            # print(f"Last inserted ID: {self.cursor.lastrowid}")
-        except mariadb.Error as e:
-            print(f"Error: {e}")
-
-        return self.cursor.lastrowid
-
-    def update_run_data(self, run_id: int, column: str, data):
-        """
-        Updates the data of a run in a particular column
-        :param run_id:
-        :param column:
-        :param data:
-        :return:
-        """
-        if column in ["status", "scenario_id"]:
-            d = data
-        else:
-            d = json.dumps(data)
-
-        try:
-            self.cursor.execute(
-                f"UPDATE {self.table} SET {column} = ? WHERE id = ?",
-                (d, run_id),
-            )
-        except mariadb.Error as e:
-            print(f"An error occurred: {e}")
-            self.conn.rollback()  # Rollback in case of DDL error
-            sys.exit(1)
-
-    def get_run(self, run_id: int):
-        """
-        Queries the MariaDB database for a run's data
-        :param run_id:
-        :return:
-        """
-        cols = [
-            "status",
-            "scenario_id",
-            "host_info",
-            "sources",
-            "repositories",
-            "dependencies",
-            "metrics",
-            "agents",
-            "resources",
-            "artefacts",
-            "run_info",
-        ]
-        try:
-            self.cursor.execute(
-                "SELECT {} FROM {} WHERE id=?;".format(", ".join(cols), self.table),
-                (run_id,),
-            )
-        except mariadb.Error as e:
-            print(f"An error occurred: {e}")
-            sys.exit(1)
-
-        for row in self.cursor:
-            d = dict(status=row[0], scenario_id=row[1])
-            for k, v in zip(cols[2:], row[2:]):
-                if v is not None:
-                    d[k] = json.loads(v)
-
-        return d
+        self.cursor.execute(
+            f"CREATE TABLE IF NOT EXISTS {self.table} ("
+            "db_id BIGINT AUTO_INCREMENT PRIMARY KEY, "
+            "run_id VARCHAR(255) NOT NULL UNIQUE, "
+            "status VARCHAR(255) NOT NULL, "
+            "jsonld LONGTEXT NOT NULL)"
+        )
+        self.file_sources_table = f"{self.table}_file_sources"
+        self.cursor.execute(
+            f"CREATE TABLE IF NOT EXISTS {self.file_sources_table} ("
+            "run_id VARCHAR(255) PRIMARY KEY, "
+            "archive_path TEXT NOT NULL, "
+            "started_at DATETIME(6) NOT NULL, "
+            "synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
+            "INDEX (started_at))"
+        )
+        super().__init__(run_id or self._active_run_id() or f"run-{uuid4()}")
+        self._load_existing()
 
     def query_active_run(self):
-        try:
-            self.cursor.execute(
-                f"SELECT id, status FROM {self.table} WHERE status ='RUNNING'"
-            )
-        except mariadb.Error as e:
-            print(f"An error occurred: {e}")
-            sys.exit(1)
+        """Return one currently running database run, if present."""
+        return self._active_run_id()
 
-        for row in self.cursor:
-            return row[0]
+    def _active_run_id(self):
+        self.cursor.execute(
+            f"SELECT run_id FROM {self.table} WHERE status = ? LIMIT 1",
+            (str(REC.RunningRun),),
+        )
+        row = self.cursor.fetchone()
+        return row[0] if row else None
 
-    def log_run_heartbeat(self, run_id: int, beat_time: datetime, result):
-        pass
+    def _load_existing(self):
+        self.cursor.execute(f"SELECT jsonld FROM {self.table} WHERE run_id = ?", (self.run_id,))
+        row = self.cursor.fetchone()
+        if row:
+            self.graph.parse(io.StringIO(row[0]), format="json-ld")
 
-    def log_cancelled_run(self, run_id: int, cancelled_time: datetime):
-        pass
+    def _persist(self):
+        if self.archive_path is not None:
+            self._set_location(self.archive_path)
+        self._upsert(self.run_id, self.graph)
+        if self.archive_path is not None:
+            started_at = self.graph.value(self.run, PROV.startedAtTime)
+            if started_at is not None:
+                self._upsert_file_source(self.run_id, self.archive_path, started_at.toPython())
 
-    def log_queued_run(self, run_id: int, queued_time: datetime):
-        pass
+    def set_file_source(self, archive_path):
+        """Associate this live database run with its file-backed source."""
+        self.archive_path = str(archive_path)
 
-    def log_started_run(
-        self, run_id: int, started_time: datetime, trigger=None, starter=None
-    ):
-        if run_id is None:
-            return self.add_run("RUNNING", started_time)
-        else:
-            print(f"Run {run_id} was already started at {started_time}")
+    def sync_file(self, path):
+        """Import one file-backed run without changing its REC identities."""
+        graph = Graph().parse(path, format="json-ld")
+        run = next(graph.subjects(REC["run-id"], None), None)
+        if run is None:
+            raise ValueError("file has no rec:run-id")
+        run_id = str(graph.value(run, REC["run-id"]))
+        started_at = graph.value(run, PROV.startedAtTime)
+        if started_at is None:
+            raise ValueError("file has no prov:startedAtTime")
+        self._upsert(run_id, graph)
+        self._upsert_file_source(run_id, path, started_at.toPython())
 
-    def log_completed_run(self, run_id: int, completed_time: datetime):
-        self.update_run_data(run_id, "status", "COMPLETED")
+    def sync_files(self, directory, started_after=None):
+        """Import archive files in start-time order, optionally after a cursor."""
+        files = []
+        for path in sorted(Path(directory).rglob("*.jsonld")):
+            graph = Graph().parse(path, format="json-ld")
+            run = next(graph.subjects(REC["run-id"], None), None)
+            started_at = graph.value(run, PROV.startedAtTime) if run else None
+            if started_at is not None and (started_after is None or started_at.toPython() > started_after):
+                files.append((started_at.toPython(), path))
+        for _, path in sorted(files):
+            self.sync_file(path)
+        return len(files)
 
-        # TODO Update the run_info dictionary
-        run_info = {"completed_time": completed_time.isoformat()}
+    def _upsert(self, run_id, graph):
+        run = next(graph.subjects(REC["run-id"], None), None)
+        status = next(
+            (str(run_type) for run_type in (REC.QueuedRun, REC.RunningRun, REC.CompletedRun, REC.FailedRun, REC.InterruptedRun, REC.CancelledRun) if (run, RDF.type, run_type) in graph),
+            str(REC.QueuedRun),
+        )
+        self.cursor.execute(
+            f"INSERT INTO {self.table} (run_id, status, jsonld) VALUES (?, ?, ?) "
+            "ON DUPLICATE KEY UPDATE status = VALUES(status), jsonld = VALUES(jsonld)",
+            (run_id, status, graph.serialize(format="json-ld", context=CONTEXT, auto_compact=True)),
+        )
+        if run_id == self.run_id and self.db_id is None:
+            self.db_id = self._db_id(run_id)
 
-    def log_interrupted_run(self, run_id: int, elapsed_time: timedelta):
-        pass
+    def _db_id(self, run_id):
+        self.cursor.execute(f"SELECT db_id FROM {self.table} WHERE run_id = ?", (run_id,))
+        row = self.cursor.fetchone()
+        return row[0] if row else None
 
-    def log_failed_run(self, run_id: int, elapsed_time: timedelta):
-        pass
+    def _upsert_file_source(self, run_id, archive_path, started_at):
+        self.cursor.execute(
+            f"INSERT INTO {self.file_sources_table} (run_id, archive_path, started_at) "
+            "VALUES (?, ?, ?) "
+            "ON DUPLICATE KEY UPDATE archive_path = VALUES(archive_path), started_at = VALUES(started_at)",
+            (run_id, str(archive_path), started_at),
+        )
 
     def close(self):
-        """
-        This method must be called when the run is over to close the connection to the DB
-        :return:
-        """
+        """Flush a live run, then close the database cursor and connection."""
+        if self.graph.value(self.run, REC["run-id"]) is not None:
+            self._persist()
         self.cursor.close()
-        # self.conn.close()
-
-
-if __name__ == "__main__":
-    db = MariaDBObserver()
-    print("Writing to the DB dummy data")
-    run_id = db.add_run("RUNNING", datetime.now(dt.UTC))
-    info = db.get_run(run_id)
-    print(info)
-
-    db.update_run_data(run_id, "scenario_id", "db-test-01")
-    db.update_run_data(
-        run_id, "agents", {"agent_id": "robot-01", "agent_type": "SoftwareAgent"}
-    )
-    db.query_active_run()
-    db.update_run_data(run_id, "status", "COMPLETED")
-
-    print("Getting run info")
-    info = db.get_run(run_id)
-    print(info)
-
-    db.close()
+        self.conn.close()

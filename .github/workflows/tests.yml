@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: MPL-2.0
+# SPDX-FileCopyrightText: 2026 SECORO AG (secoro.uni-bremen.de)
+# Author: Vamsi Kalagaturu
+
+name: Tests (Python 3.12 and 3.14)
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.14"]
+    services:
+      mariadb:
+        image: mariadb:11
+        env:
+          MARIADB_DATABASE: rec_test
+          MARIADB_USER: rec
+          MARIADB_PASSWORD: rec
+          MARIADB_ROOT_PASSWORD: root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: secorolab/metamodels
+          ref: main
+          path: metamodels
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: sudo apt-get update
+      - run: sudo apt-get install --yes libmariadb-dev
+      - run: pip install -e ".[mariadb,dev]"
+      - run: pytest -q
+        env:
+          MARIADB_USER: rec
+          MARIADB_PASSWORD: rec
+          MARIADB_HOST: 127.0.0.1
+          MARIADB_PORT: 3306
+          REC_TEST_MARIADB_DATABASE: rec_test
+          REC_METAMODELS_DIR: metamodels
