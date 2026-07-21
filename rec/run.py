@@ -3,7 +3,11 @@
 # Author: Argentina Ortega
 
 import datetime
+import logging
+import platform
+import socket
 import threading
+import traceback
 from typing import Sequence
 from uuid import uuid4
 
@@ -12,6 +16,8 @@ from rdflib import Namespace
 from rec.observers.base import BaseObserver
 
 REC = Namespace("https://secorolab.github.io/metamodels/rec#")
+
+logger = logging.getLogger(__name__)
 
 
 class IntervalTimer(threading.Thread):
@@ -30,6 +36,20 @@ class IntervalTimer(threading.Thread):
     def run(self):
         while not self.stopped.wait(self.interval):
             self.func()
+
+
+def _fail_trace(error):
+    return "".join(traceback.format_exception(error)) if error is not None else None
+
+
+def host_info():
+    """Return this machine's hostname, operating system, runtime, and CPU."""
+    return {
+        "hostname": socket.gethostname(),
+        "os": platform.platform(),
+        "python": platform.python_version(),
+        "cpu": platform.processor() or None,
+    }
 
 
 class Run:
@@ -64,6 +84,7 @@ class Run:
         self.post_run_hooks = post_run_hooks or []
 
         self.beat_interval = 10
+        self._heartbeat = None
 
     def _get_active_run(self):
         if self._id is not None:
@@ -77,6 +98,12 @@ class Run:
     def _stop_time(self):
         self.end_time = datetime.datetime.now(datetime.UTC)
         return self.end_time
+
+    def elapsed_time(self):
+        """Return how long the run has been going, or ``None`` before it starts."""
+        if self.start_time is None:
+            return None
+        return (self.end_time or datetime.datetime.now(datetime.UTC)) - self.start_time
 
     def _start_heartbeat(self):
         if self.beat_interval > 0:
@@ -93,12 +120,14 @@ class Run:
 
     def _emit_heartbeat(self):
         beat_time = datetime.datetime.now(datetime.UTC)
+        logger.debug("Run %s still running, result so far: %s", self._id, self.result)
         for observer in self.observers:
             observer.log_run_heartbeat(beat_time, self.result)
 
     def _emit_cancelled(self):
         self.status = RunStatus.CANCELLED
-        cancelled_time = datetime.datetime.now(datetime.UTC)
+        cancelled_time = self._stop_time()
+        logger.info("Cancelled run %s", self._id)
 
         # Update info on observers
         for observer in self.observers:
@@ -106,8 +135,10 @@ class Run:
 
     def _emit_queued(self):
         self.status = RunStatus.QUEUED
+        queued_time = datetime.datetime.now(datetime.UTC)
+        logger.info("Queued run %s", self._id)
         for observer in self.observers:
-            observer.log_queued_run(self._id)
+            observer.log_queued_run(self._id, queued_time)
 
     def _emit_started(self):
         self.status = RunStatus.RUNNING
@@ -117,28 +148,52 @@ class Run:
         for observer in self.observers:
             _id = observer.log_started_run(self._id, self.start_time)
             self._id = _id
+        logger.info("Starting run %s", self._id)
+        self.log_host_info(host_info())
 
     def _emit_completed(self):
         self.status = RunStatus.COMPLETED
         completed_time = self._stop_time()
+        logger.info("Completed run %s after %s, result: %s", self._id, self.elapsed_time(), self.result)
         for observer in self.observers:
             observer.log_completed_run(completed_time)
 
-    def _emit_interrupted(self):
+    def _emit_interrupted(self, error=None):
         self.status = RunStatus.INTERRUPTED
         interrupted_time = self._stop_time()
+        logger.warning("Interrupted run %s after %s", self._id, self.elapsed_time())
         for observer in self.observers:
-            observer.log_interrupted_run(interrupted_time)
+            observer.log_interrupted_run(interrupted_time, _fail_trace(error))
 
-    def _emit_failed(self):
+    def _emit_failed(self, error=None):
         self.status = RunStatus.FAILED
         failed_time = self._stop_time()
+        logger.error("Failed run %s after %s", self._id, self.elapsed_time(), exc_info=error)
         for observer in self.observers:
-            observer.log_failed_run(failed_time)
+            observer.log_failed_run(failed_time, _fail_trace(error))
 
     def _execute_hooks(self, hooks):
         for hook in hooks:
             hook()
+
+    def queue(self):
+        """Record this run as queued, before :meth:`run` starts it."""
+        if self.status is not None:
+            raise RuntimeError(f"cannot queue a run with status {self.status}")
+        self._id = self._id or f"run-{uuid4()}"
+        self._emit_queued()
+        return self._id
+
+    def cancel(self):
+        """Cancel a queued run before it starts.
+
+        A run stopped while already running is interrupted, not cancelled.
+        """
+        if self.status is not RunStatus.QUEUED:
+            raise RuntimeError(f"only a queued run can be cancelled, not {self.status}")
+        self._emit_cancelled()
+        for observer in self.observers:
+            observer.close()
 
     def main(self):
         """Execute the work represented by this run.
@@ -149,6 +204,8 @@ class Run:
 
     def run(self):
         """Run ``main`` and record completion, failure, or interruption."""
+        if self.status is RunStatus.CANCELLED:
+            raise RuntimeError("cannot start a cancelled run")
 
         try:
             self._emit_started()
@@ -158,12 +215,12 @@ class Run:
             self._emit_completed()
             self._stop_heartbeat()
             self._execute_hooks(self.post_run_hooks)
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as interrupt:
             self._stop_heartbeat()
-            self._emit_interrupted()
-        except Exception:
+            self._emit_interrupted(interrupt)
+        except Exception as error:
             self._stop_heartbeat()
-            self._emit_failed()
+            self._emit_failed(error)
         finally:
             for observer in self.observers:
                 observer.close()

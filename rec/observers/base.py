@@ -12,7 +12,7 @@ class BaseObserver:
     def log_cancelled_run(self, cancelled_time: datetime):
         raise NotImplementedError
 
-    def log_queued_run(self, run_id: str):
+    def log_queued_run(self, run_id: str, queued_time: datetime):
         raise NotImplementedError
 
     def log_started_run(self, run_id: str, started_time: datetime) -> str:
@@ -21,10 +21,10 @@ class BaseObserver:
     def log_completed_run(self, completed_time: datetime):
         raise NotImplementedError
 
-    def log_interrupted_run(self, interrupted_time: datetime):
+    def log_interrupted_run(self, interrupted_time: datetime, fail_trace: str | None = None):
         raise NotImplementedError
 
-    def log_failed_run(self, failed_time: datetime):
+    def log_failed_run(self, failed_time: datetime, fail_trace: str | None = None):
         raise NotImplementedError
 
     def close(self):

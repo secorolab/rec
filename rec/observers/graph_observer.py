@@ -4,7 +4,7 @@
 
 """Shared direct-RDF implementation for REC storage backends."""
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from rdflib import Graph, Literal, Namespace, URIRef
@@ -20,6 +20,13 @@ DCAT = Namespace("http://www.w3.org/ns/dcat#")
 REC_CONTEXT = "https://secorolab.github.io/metamodels/rec/rec.json"
 PREFIXES = {"prov": str(PROV), "rec": str(REC), "qudt": str(QUDT), "dcat": str(DCAT)}
 CONTEXT = [REC_CONTEXT, {"prov": str(PROV), "qudt": str(QUDT), "dcat": str(DCAT)}]
+
+HOST_FIELDS = {
+    "hostname": REC.hostname,
+    "os": REC.os,
+    "python": REC.runtime,
+    "cpu": REC.cpu,
+}
 
 RUN_TYPES = (
     REC.QueuedRun,
@@ -37,6 +44,7 @@ class GraphObserver(BaseObserver):
     def __init__(self, run_id):
         self.run_id = str(run_id)
         self.graph = Graph()
+        self._metric_steps = {}
         for prefix, namespace in PREFIXES.items():
             self.graph.bind(prefix, Namespace(namespace))
 
@@ -49,9 +57,10 @@ class GraphObserver(BaseObserver):
         """Return this observer's running ID, or ``None`` when it is not running."""
         return self.run_id if (self.run, RDF.type, REC.RunningRun) in self.graph else None
 
-    def log_queued_run(self, run_id: str):
-        """Record ``run_id`` as a queued REC run."""
+    def log_queued_run(self, run_id: str, queued_time: datetime):
+        """Record ``run_id`` as a REC run queued at ``queued_time``."""
         self._set_run(run_id, REC.QueuedRun)
+        self.graph.set((self.run, REC["queued-time"], _time(queued_time)))
         self._persist()
 
     def log_started_run(self, run_id: str, started_time: datetime) -> str:
@@ -76,13 +85,13 @@ class GraphObserver(BaseObserver):
         """Record successful completion at ``completed_time``."""
         self._finish(REC.CompletedRun, completed_time)
 
-    def log_interrupted_run(self, interrupted_time: datetime):
-        """Record interruption at ``interrupted_time``."""
-        self._finish(REC.InterruptedRun, interrupted_time)
+    def log_interrupted_run(self, interrupted_time: datetime, fail_trace: str | None = None):
+        """Record interruption at ``interrupted_time`` with its optional stacktrace."""
+        self._finish(REC.InterruptedRun, interrupted_time, fail_trace)
 
-    def log_failed_run(self, failed_time: datetime):
-        """Record failure at ``failed_time``."""
-        self._finish(REC.FailedRun, failed_time)
+    def log_failed_run(self, failed_time: datetime, fail_trace: str | None = None):
+        """Record failure at ``failed_time`` with its optional stacktrace."""
+        self._finish(REC.FailedRun, failed_time, fail_trace)
 
     def log_sources(self, sources):
         """Record source-file rows containing ``path`` and optional file metadata."""
@@ -130,7 +139,7 @@ class GraphObserver(BaseObserver):
         host = REC[f"entity/{_safe(self.run_id)}/host"]
         self.graph.add((self.run, REC["host-info"], host))
         self.graph.add((host, RDF.type, REC.Host))
-        for key, predicate in {"hostname": REC.hostname, "os": REC.os, "python": REC.runtime}.items():
+        for key, predicate in HOST_FIELDS.items():
             self._literal(host, predicate, (host_info or {}).get(key))
         self._persist()
 
@@ -179,17 +188,35 @@ class GraphObserver(BaseObserver):
         self._persist()
 
     def log_scalar(self, metric_name, value, step=None):
-        """Record a dimensionless QUDT metric, optionally at a step."""
-        metric = REC[f"metric/{_safe(metric_name)}" + (f"/{step}" if step is not None else "")]
+        """Record a dimensionless QUDT metric at ``step``, auto-numbered when omitted."""
+        if step is None:
+            step = self._next_step(metric_name)
+        metric = REC[f"metric/{_safe(metric_name)}/{step}"]
         self.graph.add((self.run, REC.metrics, metric))
         self.graph.add((metric, RDF.type, REC.Metric))
         self.graph.add((metric, RDF.type, QUDT.Quantity))
+        self._literal(metric, REC.label, metric_name)
         self.graph.set((metric, QUDT.hasQuantityKind, QK.Dimensionless))
         self.graph.set((metric, QUDT.value, Literal(value)))
         self.graph.set((metric, QUDT.unit, UNIT.UNITLESS))
-        if step is not None:
-            self.graph.set((metric, REC.step, Literal(step, datatype=XSD.integer)))
+        self.graph.set((metric, REC.step, Literal(step, datatype=XSD.integer)))
+        self.graph.set((metric, PROV.generatedAtTime, _time(datetime.now(UTC))))
         self._persist()
+
+    def _next_step(self, metric_name):
+        """Return the next auto-increment step for ``metric_name``."""
+        if metric_name not in self._metric_steps:
+            # the JSON-LD context drops xsd:string, so match labels by value
+            recorded = [
+                int(step)
+                for metric in self.graph.objects(self.run, REC.metrics)
+                if str(self.graph.value(metric, REC.label)) == str(metric_name)
+                for step in self.graph.objects(metric, REC.step)
+            ]
+            self._metric_steps[metric_name] = max(recorded) + 1 if recorded else 0
+        step = self._metric_steps[metric_name]
+        self._metric_steps[metric_name] = step + 1
+        return step
 
     def close(self):
         """Flush the current graph to the storage backend."""
@@ -211,9 +238,10 @@ class GraphObserver(BaseObserver):
         self.graph.add((self.run, RDF.type, run_type))
         self.graph.set((self.run, REC["run-id"], Literal(self.run_id, datatype=XSD.string)))
 
-    def _finish(self, run_type, ended_at):
+    def _finish(self, run_type, ended_at, fail_trace=None):
         self._set_run(None, run_type)
         self.graph.set((self.run, PROV.endedAtTime, _time(ended_at)))
+        self._literal(self.run, REC["fail-trace"], fail_trace)
         self._persist()
 
     def _set_location(self, path):
