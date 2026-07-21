@@ -65,6 +65,22 @@ def test_mariadb_only_run(database):
     assert graph.value(node, PROV.atLocation) is None
 
 
+def test_runs_get_sequential_database_numbers(database, tmp_path):
+    observer = database()
+    Run(observers=[observer], run_id="first")._emit_started()
+    assert observer.db_id == 1
+
+    later = MariaDBObserver(run_id="second", db_name=TEST_DATABASE, table=observer.table)
+    Run(observers=[later], run_id="second")._emit_started()
+    assert later.db_id == 2
+
+    reopened = MariaDBObserver(run_id="first", db_name=TEST_DATABASE, table=observer.table)
+    reopened.log_completed_run(datetime.now(UTC))
+    assert reopened.db_id == 1
+    later.close()
+    reopened.close()
+
+
 def test_file_and_mariadb_share_the_archive_location(database, tmp_path):
     path = tmp_path / "run.jsonld"
     db = database()

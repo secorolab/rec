@@ -25,6 +25,12 @@ class MariaDBObserver(GraphObserver):
         run_id: Existing run to reopen, or an ID generated for a new run.
         db_name: Database selected from the configured MariaDB server.
         table: Base table name for runs and file-source mappings.
+
+    Attributes:
+        db_id: Short sequential number this database gave the run, for display
+            and ordering. The canonical identity stays ``rec:run-id``, which is
+            portable across databases as ``db_id`` is not. Archives synchronised
+            with :meth:`sync_files` are numbered in start-time order.
     """
 
     def __init__(self, run_id=None, db_name="logbook", table="runs"):
@@ -32,6 +38,7 @@ class MariaDBObserver(GraphObserver):
             raise ValueError("table must be a simple SQL identifier")
         self.table = table
         self.archive_path = None
+        self.db_id = None
         load_dotenv()
         self.conn = mariadb.connect(
             user=os.getenv("MARIADB_USER"),
@@ -129,6 +136,13 @@ class MariaDBObserver(GraphObserver):
             "ON DUPLICATE KEY UPDATE status = VALUES(status), jsonld = VALUES(jsonld)",
             (run_id, status, graph.serialize(format="json-ld", context=CONTEXT, auto_compact=True)),
         )
+        if run_id == self.run_id and self.db_id is None:
+            self.db_id = self._db_id(run_id)
+
+    def _db_id(self, run_id):
+        self.cursor.execute(f"SELECT db_id FROM {self.table} WHERE run_id = ?", (run_id,))
+        row = self.cursor.fetchone()
+        return row[0] if row else None
 
     def _upsert_file_source(self, run_id, archive_path, started_at):
         self.cursor.execute(
