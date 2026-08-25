@@ -8,6 +8,8 @@ description = "Robot Execution Catalog (REC) is a python library to manage data 
 dynamic = ["version"]
 dependencies = [
     "click>=8.1.7",
+    "owlrl",
+    "pyshacl",
     "rdflib"
 ]
 requires-python = ">= 3.12"
