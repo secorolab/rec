@@ -4,7 +4,7 @@
 """Consolidate one run's provenance documents into a single named-graph dataset.
 
 The live observers never merge. This is the one-shot batch step that runs after the terminal
-lifecycle event: it reads the run's five documents, checks that they describe one run node,
+lifecycle event: it reads the run's documents, checks that they describe one run node,
 materialises the subclass entailments the axioms license, validates the spine and writes
 ``provenance.trig``. It rewrites no input.
 
@@ -31,7 +31,6 @@ REC_GRAPH = URIRef("urn:rec")
 RUNTIME_GRAPH = URIRef("urn:runtime")
 BDD_GRAPH = URIRef("urn:bdd")
 GENERATION_GRAPH = URIRef("urn:generation")
-PLAN_GRAPH = URIRef("urn:plan")
 DESIGN_GRAPH = URIRef("urn:design")
 INFERRED_GRAPH = URIRef("urn:inferred")
 
@@ -72,7 +71,6 @@ def consolidate_run(
         (RUNTIME_GRAPH, [_required(run_dir / "runtime" / "runtime.ttl")], "turtle"),
         (BDD_GRAPH, sorted((run_dir / "runtime").glob("bdd-*.ttl")), "turtle"),
         (GENERATION_GRAPH, [provenance / name for name in GENERATION_DOCUMENTS], "json-ld"),
-        (PLAN_GRAPH, [provenance / "plan.ld.json"], "json-ld"),
         (DESIGN_GRAPH, sorted((generation_dir / "generated" / "model").glob("*.ld.json")), "json-ld"),
     )
     for name, paths, fmt in documents:

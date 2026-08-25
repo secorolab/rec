@@ -132,7 +132,10 @@ def test_consolidation_writes_the_named_graphs(tmp_path):
     assert path == run_dir / "provenance.trig"
     dataset = Dataset()
     dataset.parse(path, format="trig")
-    assert {graph.identifier for graph in dataset.graphs()} >= {REC_GRAPH, RUNTIME_GRAPH, INFERRED_GRAPH}
+    names = {graph.identifier for graph in dataset.graphs()}
+    assert names >= {REC_GRAPH, RUNTIME_GRAPH, INFERRED_GRAPH}
+    # The compiled layer is the derived design graph; no prospective document is consolidated.
+    assert URIRef("urn:plan") not in names
     assert len(dataset.graph(BDD_GRAPH)) == 0
 
 
