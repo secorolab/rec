@@ -13,12 +13,15 @@ from rdflib import Graph
 from rdflib.namespace import PROV, RDF
 
 from rec.observers import FileObserver, MariaDBObserver
-from rec.observers.graph_observer import REC
+from rec.observers.graph_observer import REC, REC_RUN
 from rec.run import Run
 
 
 TEST_DATABASE = os.getenv("REC_TEST_MARIADB_DATABASE")
-pytestmark = pytest.mark.skipif(not TEST_DATABASE, reason="set REC_TEST_MARIADB_DATABASE to run MariaDB integration tests")
+pytestmark = pytest.mark.skipif(
+    not TEST_DATABASE,
+    reason="set REC_TEST_MARIADB_DATABASE to run MariaDB integration tests",
+)
 
 
 @pytest.fixture
@@ -60,7 +63,7 @@ def test_mariadb_only_run(database):
     run._emit_completed()
 
     graph = stored_graph(observer, "db-only")
-    node = REC["activity/db-only"]
+    node = REC_RUN["db-only"]
     assert (node, RDF.type, REC.CompletedRun) in graph
     assert graph.value(node, PROV.atLocation) is None
 
@@ -90,9 +93,12 @@ def test_file_and_mariadb_share_the_archive_location(database, tmp_path):
     run._emit_completed()
 
     graph = stored_graph(db, "both")
-    node = REC["activity/both"]
+    node = REC_RUN["both"]
     assert str(graph.value(graph.value(node, PROV.atLocation), REC.path)).endswith("run.jsonld")
-    db.cursor.execute(f"SELECT run_id, archive_path FROM {db.file_sources_table} WHERE run_id = ?", ("both",))
+    db.cursor.execute(
+        f"SELECT run_id, archive_path FROM {db.file_sources_table} WHERE run_id = ?",
+        ("both",),
+    )
     assert db.cursor.fetchone() == ("both", str(path))
 
 
@@ -104,7 +110,7 @@ def test_sync_file_preserves_the_archive_location(database, tmp_path):
     db.sync_file(path)
 
     graph = stored_graph(db, "file-only")
-    node = REC["activity/file-only"]
+    node = REC_RUN["file-only"]
     assert str(graph.value(graph.value(node, PROV.atLocation), REC.path)).endswith("run.jsonld")
 
 

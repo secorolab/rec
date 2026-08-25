@@ -6,9 +6,10 @@ import socket
 
 import pytest
 from rdflib import Graph, Namespace, RDF
-from rdflib.namespace import PROV
+from rdflib.namespace import PROV, RDFS
 
 from rec.observers import FileObserver
+from rec.observers.graph_observer import REC_RUN
 from rec.run import Run, RunStatus
 
 REC = Namespace("https://secorolab.github.io/metamodels/rec#")
@@ -33,11 +34,13 @@ def test_queued_run_cancels(tmp_path):
     run.cancel()
 
     graph = Graph().parse(path, format="json-ld")
-    activity = REC["activity/run-1"]
+    activity = REC_RUN["run-1"]
     assert (activity, RDF.type, REC.CancelledRun) in graph
     assert (activity, RDF.type, REC.RunningRun) not in graph
     assert graph.value(activity, PROV.startedAtTime) is None
-    assert graph.value(activity, REC["queued-time"]) is not None
+    queue = REC_RUN["run-1/queue"]
+    assert (activity, PROV.qualifiedInfluence, queue) in graph
+    assert graph.value(queue, PROV.atTime) is not None
     assert run.info()["end_time"] is not None
 
 
@@ -48,7 +51,7 @@ def test_failed_run_records_its_stacktrace(tmp_path):
     run.run()
 
     graph = Graph().parse(path, format="json-ld")
-    activity = REC["activity/run-6"]
+    activity = REC_RUN["run-6"]
     assert run.status is RunStatus.FAILED
     assert (activity, RDF.type, REC.FailedRun) in graph
     trace = str(graph.value(activity, REC["fail-trace"]))
@@ -63,7 +66,7 @@ def test_running_run_interrupts_not_cancels(tmp_path):
     run.run()
 
     graph = Graph().parse(path, format="json-ld")
-    activity = REC["activity/run-2"]
+    activity = REC_RUN["run-2"]
     assert run.status is RunStatus.INTERRUPTED
     assert (activity, RDF.type, REC.InterruptedRun) in graph
     assert graph.value(activity, PROV.startedAtTime) is not None
@@ -94,7 +97,7 @@ def points(graph, metric_name):
     return {
         (int(graph.value(metric, REC.step)), float(graph.value(metric, QUDT.value)))
         for metric in graph.objects(None, REC.metrics)
-        if str(graph.value(metric, REC.label)) == metric_name
+        if str(graph.value(metric, RDFS.label)) == metric_name
     }
 
 
@@ -104,7 +107,7 @@ def test_host_info_is_collected_at_start(tmp_path):
     run._emit_started()
 
     graph = Graph().parse(path, format="json-ld")
-    host = graph.value(REC["activity/run-5"], REC["host-info"])
+    host = graph.value(REC_RUN["run-5"], REC["host-info"])
     assert (host, RDF.type, REC.Host) in graph
     assert str(graph.value(host, REC.hostname)) == socket.gethostname()
     assert graph.value(host, REC.os) is not None
@@ -117,7 +120,7 @@ def test_started_run_records_its_trigger_and_starter(tmp_path):
     run._emit_started(trigger="rec:entity/schedule", starter="rec:activity/scheduler")
 
     graph = Graph().parse(path, format="json-ld")
-    activity = REC["activity/run-7"]
+    activity = REC_RUN["run-7"]
     trigger = REC["entity/schedule"]
     assert (activity, PROV.wasStartedBy, trigger) in graph
     start = graph.value(activity, PROV.qualifiedStart)
@@ -133,7 +136,7 @@ def test_started_run_without_trigger_is_unqualified(tmp_path):
     run._emit_started()
 
     graph = Graph().parse(path, format="json-ld")
-    assert graph.value(REC["activity/run-8"], PROV.qualifiedStart) is None
+    assert graph.value(REC_RUN["run-8"], PROV.qualifiedStart) is None
 
 
 def test_cancelled_run_cannot_start(tmp_path):

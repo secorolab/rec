@@ -4,22 +4,33 @@
 
 """Shared direct-RDF implementation for REC storage backends."""
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
 from rdflib import Graph, Literal, Namespace, URIRef
-from rdflib.namespace import PROV, RDF, XSD
+from rdflib.namespace import DCTERMS, PROV, RDF, RDFS, XSD, split_uri
 
 from rec.observers.base import BaseObserver
 
 REC = Namespace("https://secorolab.github.io/metamodels/rec#")
+# Instance data never lives in the metamodel namespace, and every node is scoped by run id so
+# two runs union without collapsing onto one another's entities and metrics.
+REC_RUN = Namespace("https://secorolab.github.io/rec/run/")
 QUDT = Namespace("http://qudt.org/schema/qudt/")
 QK = Namespace("http://qudt.org/vocab/quantitykind/")
 UNIT = Namespace("http://qudt.org/vocab/unit/")
 DCAT = Namespace("http://www.w3.org/ns/dcat#")
 REC_CONTEXT = "https://secorolab.github.io/metamodels/rec/rec.json"
-PREFIXES = {"prov": str(PROV), "rec": str(REC), "qudt": str(QUDT), "dcat": str(DCAT)}
-CONTEXT = [REC_CONTEXT, {"prov": str(PROV), "qudt": str(QUDT), "dcat": str(DCAT)}]
+UPSTREAM = {
+    "prov": str(PROV),
+    "qudt": str(QUDT),
+    "dcat": str(DCAT),
+    "dcterms": str(DCTERMS),
+    "rdfs": str(RDFS),
+}
+PREFIXES = {"rec": str(REC), **UPSTREAM}
+CONTEXT = [REC_CONTEXT, UPSTREAM]
 
 HOST_FIELDS = {
     "hostname": REC.hostname,
@@ -41,8 +52,11 @@ RUN_TYPES = (
 class GraphObserver(BaseObserver):
     """Build the backend-independent REC graph directly from run events."""
 
-    def __init__(self, run_id):
+    def __init__(self, run_id, run_iri=None):
         self.run_id = str(run_id)
+        # A caller that already minted the run elsewhere (motion-spec) passes its IRI, so its
+        # runtime graph and this document describe one node instead of two.
+        self.run_iri = URIRef(run_iri) if run_iri else None
         self.graph = Graph()
         self._metric_steps = {}
         for prefix, namespace in PREFIXES.items():
@@ -51,7 +65,11 @@ class GraphObserver(BaseObserver):
     @property
     def run(self):
         """Return the RDF subject for the current run."""
-        return REC[f"activity/{_safe(self.run_id)}"]
+        return self.run_iri or REC_RUN[_slug(self.run_id)]
+
+    def _scoped(self, *segments):
+        """Return an instance IRI for this run's ``segments``."""
+        return REC_RUN[f"{_slug(self.run_id)}/" + "/".join(_slug(segment) for segment in segments)]
 
     def query_active_run(self):
         """Return this observer's running ID, or ``None`` when it is not running."""
@@ -60,7 +78,7 @@ class GraphObserver(BaseObserver):
     def log_queued_run(self, run_id: str, queued_time: datetime):
         """Record ``run_id`` as a REC run queued at ``queued_time``."""
         self._set_run(run_id, REC.QueuedRun)
-        self.graph.set((self.run, REC["queued-time"], _time(queued_time)))
+        self._influence("queue", queued_time)
         self._persist()
 
     def log_started_run(self, run_id: str, started_time: datetime, trigger=None, starter=None) -> str:
@@ -74,7 +92,7 @@ class GraphObserver(BaseObserver):
 
     def log_run_heartbeat(self, beat_time: datetime, result: object | None):
         """Record a heartbeat and its optional current result."""
-        self.graph.set((self.run, REC["heartbeat-time"], _time(beat_time)))
+        self._influence("heartbeat", beat_time)
         if result is not None:
             self.graph.set((self.run, REC.result, Literal(result)))
         self._persist()
@@ -98,15 +116,15 @@ class GraphObserver(BaseObserver):
     def log_sources(self, sources):
         """Record source-file rows containing ``path`` and optional file metadata."""
         for source in _rows(sources):
-            self._entity(
+            entity, _ = self._entity(
                 source.get("path"),
-                REC.resources,
                 source.get("label"),
                 source.get("sha256"),
                 source.get("size_bytes"),
                 source.get("archive_path") or source.get("archivePath"),
                 REC.SourceFile,
             )
+            self.graph.add((self.run, PROV.used, entity))
         self._persist()
 
     def log_repositories(self, repositories):
@@ -115,12 +133,14 @@ class GraphObserver(BaseObserver):
             name = row.get("name") or row.get("path")
             if not name:
                 continue
-            repository = REC[f"repository/{_safe(name)}"]
+            repository = self._scoped("repository", name)
             self.graph.add((self.run, REC.repositories, repository))
             self.graph.add((repository, RDF.type, REC.Repository))
-            self._literal(repository, REC.label, row.get("name"))
-            self._literal(repository, REC.url, row.get("url") or row.get("path"))
-            self._literal(repository, REC.revision, row.get("commit") or row.get("revision") or row.get("tag"))
+            self._literal(repository, RDFS.label, row.get("name"))
+            url = _url(row.get("url") or row.get("path"))
+            if url is not None:
+                self.graph.set((repository, DCAT.accessURL, url))
+            self._literal(repository, DCTERMS.hasVersion, row.get("commit") or row.get("revision") or row.get("tag"))
         self._persist()
 
     def log_dependencies(self, dependencies):
@@ -129,16 +149,16 @@ class GraphObserver(BaseObserver):
             name = row.get("name") or row.get("label")
             if not name:
                 continue
-            dependency = REC[f"dependency/{_safe(name)}"]
+            dependency = self._scoped("dependency", name)
             self.graph.add((self.run, REC.dependencies, dependency))
             self.graph.add((dependency, RDF.type, REC.Dependency))
-            self._literal(dependency, REC.label, name)
+            self._literal(dependency, RDFS.label, name)
             self._literal(dependency, DCAT.version, row.get("version") or row.get("hasVersion"))
         self._persist()
 
     def log_host_info(self, host_info):
         """Record the host's hostname, operating system, and runtime metadata."""
-        host = REC[f"entity/{_safe(self.run_id)}/host"]
+        host = self._scoped("host")
         self.graph.add((self.run, REC["host-info"], host))
         self.graph.add((host, RDF.type, REC.Host))
         for key, predicate in HOST_FIELDS.items():
@@ -148,7 +168,7 @@ class GraphObserver(BaseObserver):
     def add_agent(self, agent_id, agent_type):
         """Add a PROV agent to the run."""
         agent = _iri(agent_id)
-        self.graph.add((self.run, REC.agents, agent))
+        self.graph.add((self.run, PROV.wasAssociatedWith, agent))
         self.graph.add((agent, RDF.type, PROV.Agent))
         for kind in _rows(agent_type):
             self.graph.add((agent, RDF.type, _iri(kind)))
@@ -157,7 +177,7 @@ class GraphObserver(BaseObserver):
     def add_activity(self, activity_id, activity_type, associated_with=None):
         """Add a PROV activity and optionally associate it with an agent."""
         activity = _iri(activity_id)
-        self.graph.add((self.run, REC.activities, activity))
+        self.graph.add((activity, PROV.wasInformedBy, self.run))
         self.graph.add((activity, RDF.type, PROV.Activity))
         for kind in _rows(activity_type):
             self.graph.add((activity, RDF.type, _iri(kind)))
@@ -167,9 +187,9 @@ class GraphObserver(BaseObserver):
 
     def add_resource(self, path, used_by, used_at, label=None, sha256=None, size_bytes=None, archive_path=None):
         """Record a PROV entity used by an activity at a specific time."""
-        entity = self._entity(path, REC.resources, label, sha256, size_bytes, archive_path)
+        entity, slug = self._entity(path, label, sha256, size_bytes, archive_path)
         activity = _iri(used_by or self.run)
-        usage = REC[f"usage/{_safe(self.run_id)}/{_safe(activity)}/{_safe(entity)}"]
+        usage = self._scoped("usage", _local(activity), slug)
         self.graph.add((activity, PROV.used, entity))
         self.graph.add((activity, PROV.qualifiedUsage, usage))
         self.graph.add((usage, RDF.type, PROV.Usage))
@@ -179,9 +199,9 @@ class GraphObserver(BaseObserver):
 
     def add_artefact(self, path, generated_by, generated_at, label=None, sha256=None, size_bytes=None, archive_path=None):
         """Record a PROV entity generated by an activity at a specific time."""
-        entity = self._entity(path, REC.artefacts, label, sha256, size_bytes, archive_path)
+        entity, slug = self._entity(path, label, sha256, size_bytes, archive_path)
         activity = _iri(generated_by or self.run)
-        generation = REC[f"generation/{_safe(entity)}"]
+        generation = self._scoped("generation", slug)
         self.graph.add((entity, PROV.wasGeneratedBy, activity))
         self.graph.add((entity, PROV.qualifiedGeneration, generation))
         self.graph.add((generation, RDF.type, PROV.Generation))
@@ -193,11 +213,10 @@ class GraphObserver(BaseObserver):
         """Record a dimensionless QUDT metric at ``step``, auto-numbered when omitted."""
         if step is None:
             step = self._next_step(metric_name)
-        metric = REC[f"metric/{_safe(metric_name)}/{step}"]
+        metric = self._scoped("metric", metric_name, step)
         self.graph.add((self.run, REC.metrics, metric))
         self.graph.add((metric, RDF.type, REC.Metric))
-        self.graph.add((metric, RDF.type, QUDT.Quantity))
-        self._literal(metric, REC.label, metric_name)
+        self._literal(metric, RDFS.label, metric_name)
         self.graph.set((metric, QUDT.hasQuantityKind, QK.Dimensionless))
         self.graph.set((metric, QUDT.value, Literal(value)))
         self.graph.set((metric, QUDT.unit, UNIT.UNITLESS))
@@ -212,7 +231,7 @@ class GraphObserver(BaseObserver):
             recorded = [
                 int(step)
                 for metric in self.graph.objects(self.run, REC.metrics)
-                if str(self.graph.value(metric, REC.label)) == str(metric_name)
+                if str(self.graph.value(metric, RDFS.label)) == str(metric_name)
                 for step in self.graph.objects(metric, REC.step)
             ]
             self._metric_steps[metric_name] = max(recorded) + 1 if recorded else 0
@@ -240,9 +259,16 @@ class GraphObserver(BaseObserver):
         self.graph.add((self.run, RDF.type, run_type))
         self.graph.set((self.run, REC["run-id"], Literal(self.run_id, datatype=XSD.string)))
 
+    def _influence(self, name, at_time):
+        """Time-stamp one qualified influence on the run, such as its queueing or a heartbeat."""
+        influence = self._scoped(name)
+        self.graph.add((self.run, PROV.qualifiedInfluence, influence))
+        self.graph.add((influence, RDF.type, PROV.Influence))
+        self.graph.set((influence, PROV.atTime, _time(at_time)))
+
     def _start(self, trigger, starter, started_time):
         """Qualify the run's start with the entity that triggered it and the activity behind it."""
-        start = REC[f"start/{_safe(self.run_id)}"]
+        start = self._scoped("start")
         self.graph.set((self.run, PROV.qualifiedStart, start))
         self.graph.add((start, RDF.type, PROV.Start))
         self.graph.set((start, PROV.atTime, _time(started_time)))
@@ -264,29 +290,28 @@ class GraphObserver(BaseObserver):
 
     def _set_location(self, path):
         """Record where this run's archive lives, as a rec:PathLocation."""
-        loc = REC[f"location/{_safe(self.run_id)}"]
+        loc = self._scoped("location")
         self.graph.set((self.run, PROV.atLocation, loc))
-        self.graph.add((loc, RDF.type, PROV.Location))
         self.graph.add((loc, RDF.type, REC.PathLocation))
-        self._literal(loc, REC.path, _location(path))
+        self._literal(loc, REC.path, str(path))
 
-    def _entity(self, path, collection, label, sha256, size_bytes, archive_path=None, extra_type=None):
+    def _entity(self, path, label, sha256, size_bytes, archive_path=None, extra_type=None):
+        """Add one file entity, identified by its archive-relative path; return it and that slug."""
         location = archive_path or path
-        entity = REC[f"entity/{_safe(location)}"]
-        self.graph.add((self.run, collection, entity))
+        slug = _path_slug(location)
+        entity = self._scoped("entity", slug)
         self.graph.add((entity, RDF.type, PROV.Entity))
         if extra_type is not None:
             self.graph.add((entity, RDF.type, extra_type))
         self._literal(entity, REC.sha256, sha256)
         self._literal(entity, REC["size-bytes"], size_bytes, XSD.integer)
-        self._literal(entity, REC.label, label)
+        self._literal(entity, RDFS.label, label)
         if location:
-            loc = REC[f"location/{_safe(entity)}"]
+            loc = self._scoped("location", slug)
             self.graph.add((entity, PROV.atLocation, loc))
-            self.graph.add((loc, RDF.type, PROV.Location))
             self.graph.add((loc, RDF.type, REC.PathLocation))
-            self._literal(loc, REC.path, _location(location))
-        return entity
+            self._literal(loc, REC.path, str(location))
+        return entity, slug
 
     def _literal(self, subject, predicate, value, datatype=XSD.string):
         if value is not None:
@@ -306,14 +331,30 @@ def _iri(value):
     return URIRef(text)
 
 
-def _safe(value):
-    return str(value).replace(":", "_").replace("/", "_").replace("#", "_")
+def _slug(value):
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("_") or "item"
+
+
+def _path_slug(value):
+    """Identity of a file: its path without traversal or anchor, flattened to one IRI segment."""
+    return _slug("_".join(part for part in Path(value).parts if part not in ("..", ".", "/")))
+
+
+def _local(iri):
+    """Name the tail of an IRI, so a derived node does not embed a whole namespace."""
+    try:
+        return split_uri(URIRef(str(iri)))[1]
+    except ValueError:
+        return _slug(iri)
+
+
+def _url(value):
+    """An access URL as an IRI; a git@host:path remote is the https form of the same URL."""
+    if not value:
+        return None
+    text = re.sub(r"^[^@/:]+@([^:/]+):", r"https://\1/", str(value))
+    return URIRef(text) if "://" in text else None
 
 
 def _time(value):
     return Literal(value.isoformat() if hasattr(value, "isoformat") else value, datatype=XSD.dateTime)
-
-
-def _location(value):
-    path = Path(value)
-    return path.as_uri() if path.is_absolute() else str(path)
