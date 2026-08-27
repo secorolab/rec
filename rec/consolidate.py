@@ -37,7 +37,9 @@ INFERRED_GRAPH = URIRef("urn:inferred")
 CONSOLIDATED = "provenance.trig"
 METAMODELS_URL = "https://secorolab.github.io/metamodels/"
 GENERATION_DOCUMENTS = ("motion-spec.ld.json", "dsl.ld.json", "coord-dsl.ld.json")
-AXIOMS = (("motion-spec", "prov.ttl"), ("rec", "rec.ttl"))
+# The subclass axioms live in the shapes files -- one .json and one .shacl.ttl per
+# vocabulary is the metamodels layout; _entail reads only the rdfs:subClassOf triples.
+AXIOMS = (("motion-spec", "prov.shacl.ttl"), ("rec", "rec.shacl.ttl"))
 # The runtime and the lifecycle are what these shapes describe. The BDD graph is deliberately
 # out: its observations time-stamp with the xsd:dateTime sosa:resultTime SOSA prescribes, while
 # ms-prov:InstantShape targets objects of sosa:resultTime and demands a time:Instant, and
@@ -147,7 +149,7 @@ def _metamodels_dir(run_dir: Path) -> Path:
     roots.extend(start.parents)
     for root in roots:
         for candidate in (root, root / "src" / "metamodels", root / "metamodels"):
-            if (candidate / "rec" / "rec.ttl").exists():
+            if (candidate / "rec" / "rec.shacl.ttl").exists():
                 return candidate
     raise ConsolidationError("could not locate the metamodels checkout (set METAMODELS_PATH)")
 
