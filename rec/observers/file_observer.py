@@ -6,7 +6,7 @@
 
 from pathlib import Path
 
-from rec.observers.graph_observer import GraphObserver, REC
+from rec.observers.graph_observer import GraphObserver, run_id_of, run_node
 
 
 class FileObserver(GraphObserver):
@@ -22,10 +22,10 @@ class FileObserver(GraphObserver):
         super().__init__("unbound", run_iri)
         if self.path.exists():
             self.graph.parse(self.path, format="json-ld")
-            run = next(self.graph.subjects(REC["run-id"], None), None)
+            run = run_node(self.graph)
             if run is None:
-                raise ValueError("existing file has no rec:run-id")
-            self.run_id = str(self.graph.value(run, REC["run-id"]))
+                raise ValueError("existing file describes no run")
+            self.run_id = run_id_of(run)
             # Reopening must continue the archive's own run node, never fork a second one.
             self.run_iri = self.run_iri or run
 

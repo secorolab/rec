@@ -8,8 +8,8 @@ lifecycle event: it reads the run's documents, checks that they describe one run
 materialises the subclass entailments the axioms license, validates the spine and writes
 ``provenance.trig``. It rewrites no input.
 
-The shared run IRI is the contract. When the documents carry the same ``rec:run-id`` under
-different subjects that is a defect report, never a merge input -- consolidation refuses.
+The shared run IRI is the contract. When the runtime record names a different run than the
+lifecycle record that is a defect report, never a merge input -- consolidation refuses.
 """
 
 import json
@@ -21,8 +21,8 @@ from pyshacl import validate
 from rdflib import BNode, Dataset, Graph, Literal, Namespace, URIRef
 from rdflib.namespace import RDF, RDFS, SOSA, XSD, split_uri
 
-MS_PROV = Namespace("https://secorolab.github.io/metamodels/motion-spec/prov#")
-REC = Namespace("https://secorolab.github.io/metamodels/rec#")
+from rec.observers.graph_observer import PROV_EXT, REC, run_node
+
 SENS = Namespace("https://secorolab.github.io/metamodels/robot/sensors#")
 QUDT = Namespace("http://qudt.org/schema/qudt/")
 TIME = Namespace("http://www.w3.org/2006/time#")
@@ -39,13 +39,16 @@ METAMODELS_URL = "https://secorolab.github.io/metamodels/"
 GENERATION_DOCUMENTS = ("motion-spec.ld.json", "dsl.ld.json", "coord-dsl.ld.json")
 # The subclass axioms live in the shapes files -- one .json and one .shacl.ttl per
 # vocabulary is the metamodels layout; _entail reads only the rdfs:subClassOf triples.
-AXIOMS = (("motion-spec", "prov.shacl.ttl"), ("rec", "rec.shacl.ttl"))
+AXIOMS = (("prov-extension.shacl.ttl",), ("rec", "rec.shacl.ttl"))
 # The runtime and the lifecycle are what these shapes describe. The BDD graph is deliberately
-# out: its observations time-stamp with the xsd:dateTime sosa:resultTime SOSA prescribes, while
-# ms-prov:InstantShape targets objects of sosa:resultTime and demands a time:Instant, and
-# sens:ObservationShape demands a sosa:madeBySensor no acceptance fluent has. The design and
-# generation documents keep their own gates in the archive.
-SHAPES = (("rec", "rec.shacl.ttl"), ("motion-spec", "prov.shacl.ttl"), ("robot", "sensors.shacl.ttl"))
+# out: sens:ObservationShape demands a sosa:madeBySensor no acceptance fluent has. The design
+# and generation documents keep their own gates in the archive.
+SHAPES = (
+    ("prov.shacl.ttl",),
+    ("prov-extension.shacl.ttl",),
+    ("rec", "rec.shacl.ttl"),
+    ("robot", "sensors.shacl.ttl"),
+)
 VALIDATED_GRAPHS = (REC_GRAPH, RUNTIME_GRAPH, INFERRED_GRAPH)
 # A sim clock counts from the simulator's own epoch, so its instants land in 1970. A wall clock
 # never does, and its stamp says nothing about a tick.
@@ -70,7 +73,7 @@ def consolidate_run(
     provenance = generation_dir / "generated" / "provenance"
     documents = (
         (REC_GRAPH, [_required(run_dir / "rec.ld.json")], "json-ld"),
-        (RUNTIME_GRAPH, [_required(run_dir / "runtime" / "runtime.ttl")], "turtle"),
+        (RUNTIME_GRAPH, [run_dir / "runtime" / "runtime.ttl"], "turtle"),
         (BDD_GRAPH, sorted((run_dir / "runtime").glob("bdd-*.ttl")), "turtle"),
         (GENERATION_GRAPH, [provenance / name for name in GENERATION_DOCUMENTS], "json-ld"),
         (DESIGN_GRAPH, sorted((generation_dir / "generated" / "model").glob("*.ld.json")), "json-ld"),
@@ -155,27 +158,28 @@ def _metamodels_dir(run_dir: Path) -> Path:
 
 
 def _verified_run(dataset: Dataset) -> URIRef:
-    """Return the one run node the runtime and the lifecycle documents agree on."""
+    """Return the one run node the lifecycle document describes, and the runtime agrees on."""
+    run = run_node(dataset.graph(REC_GRAPH))
+    if run is None:
+        raise ConsolidationError("rec.ld.json describes no run: no node carries an oslc_auto:state")
     runtime = dataset.graph(RUNTIME_GRAPH)
-    runs = set(runtime.subjects(RDF.type, MS_PROV.TaskExecution))
+    if not len(runtime):
+        return run
+    runs = set(runtime.subjects(RDF.type, PROV_EXT.Execution))
     if not runs:
         raise ConsolidationError(
-            "runtime.ttl declares no ms-prov:TaskExecution: this archive predates the run "
+            "runtime.ttl declares no prov-ext:Execution: this archive predates the run "
             "vocabulary -- regenerate with --recover-runtime-ttl"
         )
     if len(runs) > 1:
         raise ConsolidationError(f"runtime.ttl declares {len(runs)} runs: {sorted(map(str, runs))}")
-    run = runs.pop()
-    lifecycle = dict(dataset.graph(REC_GRAPH).subject_objects(REC["run-id"]))
-    if run in lifecycle:
+    recorded = runs.pop()
+    if recorded == run:
         return run
-    matching = [subject for subject, run_id in lifecycle.items() if str(run_id) in str(run)]
-    if matching:
-        raise ConsolidationError(
-            f"the run id matches but the IRIs do not: runtime says <{run}>, rec.ld.json says "
-            f"<{matching[0]}> -- the shared IRI is the contract, consolidation does not patch it"
-        )
-    raise ConsolidationError(f"rec.ld.json carries no rec:run-id for <{run}>")
+    raise ConsolidationError(
+        f"the runtime and the lifecycle name different runs: runtime says <{recorded}>, "
+        f"rec.ld.json says <{run}> -- the shared IRI is the contract, consolidation does not patch it"
+    )
 
 
 def _entail(dataset: Dataset, inferred: Graph, metamodels_dir: Path) -> None:
@@ -211,9 +215,9 @@ def _enrich_bdd_ticks(dataset: Dataset, inferred: Graph, run: URIRef) -> None:
     than displacing a literal that is already correct.
     """
     bdd = dataset.graph(BDD_GRAPH)
-    if not len(bdd):
-        return
     runtime = dataset.graph(RUNTIME_GRAPH)
+    if not len(bdd) or not len(runtime):
+        return
     trs, rate = _tick_scale(runtime, run)
     if trs is None or rate is None:
         return

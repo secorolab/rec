@@ -12,10 +12,10 @@ from uuid import uuid4
 
 import mariadb
 from dotenv import load_dotenv
-from rdflib import Graph, Literal
-from rdflib.namespace import PROV, RDF, XSD
+from rdflib import Graph
+from rdflib.namespace import PROV
 
-from rec.observers.graph_observer import CONTEXT, GraphObserver, REC
+from rec.observers.graph_observer import CONTEXT, OSLC_AUTO, GraphObserver, run_id_of, run_node
 
 
 class MariaDBObserver(GraphObserver):
@@ -28,7 +28,7 @@ class MariaDBObserver(GraphObserver):
 
     Attributes:
         db_id: Short sequential number this database gave the run, for display
-            and ordering. The canonical identity stays ``rec:run-id``, which is
+            and ordering. The canonical identity stays the run IRI, which is
             portable across databases as ``db_id`` is not. Archives synchronised
             with :meth:`sync_files` are numbered in start-time order.
     """
@@ -75,7 +75,7 @@ class MariaDBObserver(GraphObserver):
     def _active_run_id(self):
         self.cursor.execute(
             f"SELECT run_id FROM {self.table} WHERE status = ? LIMIT 1",
-            (str(REC.RunningRun),),
+            (str(OSLC_AUTO.inProgress),),
         )
         row = self.cursor.fetchone()
         return row[0] if row else None
@@ -102,10 +102,10 @@ class MariaDBObserver(GraphObserver):
     def sync_file(self, path):
         """Import one file-backed run without changing its REC identities."""
         graph = Graph().parse(path, format="json-ld")
-        run = next(graph.subjects(REC["run-id"], None), None)
+        run = run_node(graph)
         if run is None:
-            raise ValueError("file has no rec:run-id")
-        run_id = str(graph.value(run, REC["run-id"]))
+            raise ValueError("file describes no run")
+        run_id = run_id_of(run)
         started_at = graph.value(run, PROV.startedAtTime)
         if started_at is None:
             raise ValueError("file has no prov:startedAtTime")
@@ -117,7 +117,7 @@ class MariaDBObserver(GraphObserver):
         files = []
         for path in sorted(Path(directory).rglob("*.jsonld")):
             graph = Graph().parse(path, format="json-ld")
-            run = next(graph.subjects(REC["run-id"], None), None)
+            run = run_node(graph)
             started_at = graph.value(run, PROV.startedAtTime) if run else None
             if started_at is not None and (started_after is None or started_at.toPython() > started_after):
                 files.append((started_at.toPython(), path))
@@ -126,11 +126,8 @@ class MariaDBObserver(GraphObserver):
         return len(files)
 
     def _upsert(self, run_id, graph):
-        run = next(graph.subjects(REC["run-id"], None), None)
-        status = next(
-            (str(run_type) for run_type in (REC.QueuedRun, REC.RunningRun, REC.CompletedRun, REC.FailedRun, REC.InterruptedRun, REC.CancelledRun) if (run, RDF.type, run_type) in graph),
-            str(REC.QueuedRun),
-        )
+        run = run_node(graph)
+        status = str(graph.value(run, OSLC_AUTO.state) if run else OSLC_AUTO.queued)
         self.cursor.execute(
             f"INSERT INTO {self.table} (run_id, status, jsonld) VALUES (?, ?, ?) "
             "ON DUPLICATE KEY UPDATE status = VALUES(status), jsonld = VALUES(jsonld)",
@@ -154,7 +151,7 @@ class MariaDBObserver(GraphObserver):
 
     def close(self):
         """Flush a live run, then close the database cursor and connection."""
-        if self.graph.value(self.run, REC["run-id"]) is not None:
+        if self.graph.value(self.run, OSLC_AUTO.state) is not None:
             self._persist()
         self.cursor.close()
         self.conn.close()

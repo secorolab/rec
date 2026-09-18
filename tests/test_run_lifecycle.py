@@ -6,10 +6,10 @@ import socket
 
 import pytest
 from rdflib import Graph, Namespace, RDF
-from rdflib.namespace import PROV, RDFS
+from rdflib.namespace import PROV, RDFS, SDO
 
 from rec.observers import FileObserver
-from rec.observers.graph_observer import REC_RUN
+from rec.observers.graph_observer import OSLC_AUTO, PROV_EXT, REC_RUN
 from rec.run import Run, RunStatus
 
 REC = Namespace("https://secorolab.github.io/metamodels/rec#")
@@ -26,6 +26,10 @@ class FailingRun(Run):
         raise ValueError("no gripper attached")
 
 
+def lifecycle(graph, run):
+    return graph.value(run, OSLC_AUTO.state), graph.value(run, OSLC_AUTO.verdict)
+
+
 def test_queued_run_cancels(tmp_path):
     path = tmp_path / "rec.jsonld"
     run = Run(observers=[FileObserver(path)], run_id="run-1")
@@ -35,12 +39,10 @@ def test_queued_run_cancels(tmp_path):
 
     graph = Graph().parse(path, format="json-ld")
     activity = REC_RUN["run-1"]
-    assert (activity, RDF.type, REC.CancelledRun) in graph
-    assert (activity, RDF.type, REC.RunningRun) not in graph
+    assert (activity, RDF.type, PROV_EXT.Execution) in graph
+    assert lifecycle(graph, activity) == (OSLC_AUTO.canceled, OSLC_AUTO.unavailable)
     assert graph.value(activity, PROV.startedAtTime) is None
-    queue = REC_RUN["run-1/queue"]
-    assert (activity, PROV.qualifiedInfluence, queue) in graph
-    assert graph.value(queue, PROV.atTime) is not None
+    assert graph.value(activity, REC["queued-time"]) is not None
     assert run.info()["end_time"] is not None
 
 
@@ -53,7 +55,7 @@ def test_failed_run_records_its_stacktrace(tmp_path):
     graph = Graph().parse(path, format="json-ld")
     activity = REC_RUN["run-6"]
     assert run.status is RunStatus.FAILED
-    assert (activity, RDF.type, REC.FailedRun) in graph
+    assert lifecycle(graph, activity) == (OSLC_AUTO.complete, OSLC_AUTO.failed)
     trace = str(graph.value(activity, REC["fail-trace"]))
     assert "ValueError: no gripper attached" in trace
     assert "Traceback (most recent call last)" in trace
@@ -68,11 +70,28 @@ def test_running_run_interrupts_not_cancels(tmp_path):
     graph = Graph().parse(path, format="json-ld")
     activity = REC_RUN["run-2"]
     assert run.status is RunStatus.INTERRUPTED
-    assert (activity, RDF.type, REC.InterruptedRun) in graph
+    assert lifecycle(graph, activity) == (OSLC_AUTO.complete, OSLC_AUTO.error)
     assert graph.value(activity, PROV.startedAtTime) is not None
 
     with pytest.raises(RuntimeError):
         run.cancel()
+
+
+def test_a_heartbeat_keeps_only_its_latest_time(tmp_path):
+    path = tmp_path / "rec.jsonld"
+    observer = FileObserver(path)
+    run = Run(observers=[observer], run_id="run-9")
+    run._emit_started()
+    run.result = "half"
+    run._emit_heartbeat()
+    run.result = "done"
+    run._emit_heartbeat()
+
+    graph = Graph().parse(path, format="json-ld")
+    activity = REC_RUN["run-9"]
+    assert len(list(graph.objects(activity, REC["heartbeat-time"]))) == 1
+    assert str(graph.value(activity, REC.result)) == "done"
+    assert observer.query_active_run() == "run-9"
 
 
 def test_stepless_scalars_do_not_overwrite(tmp_path):
@@ -88,15 +107,16 @@ def test_stepless_scalars_do_not_overwrite(tmp_path):
     graph = Graph().parse(path, format="json-ld")
     assert points(graph, "loss") == {(0, 0.5), (1, 0.3), (2, 0.1)}
     assert points(graph, "frames") == {(7, 10)}
-    frames = next(metric for metric in graph.objects(None, REC.metrics) if "frames" in str(metric))
+    frames = next(metric for metric in graph.subjects(RDF.type, REC.Metric) if "frames" in str(metric))
     assert graph.value(frames, PROV.generatedAtTime) is not None
+    assert (frames, PROV.wasGeneratedBy, REC_RUN["run-4"]) in graph
 
 
 def points(graph, metric_name):
     """Return the ``(step, value)`` pairs recorded for ``metric_name``."""
     return {
         (int(graph.value(metric, REC.step)), float(graph.value(metric, QUDT.value)))
-        for metric in graph.objects(None, REC.metrics)
+        for metric in graph.subjects(RDF.type, REC.Metric)
         if str(graph.value(metric, RDFS.label)) == metric_name
     }
 
@@ -107,9 +127,12 @@ def test_host_info_is_collected_at_start(tmp_path):
     run._emit_started()
 
     graph = Graph().parse(path, format="json-ld")
-    host = graph.value(REC_RUN["run-5"], REC["host-info"])
-    assert (host, RDF.type, REC.Host) in graph
-    assert str(graph.value(host, REC.hostname)) == socket.gethostname()
+    host = next(
+        location
+        for location in graph.objects(REC_RUN["run-5"], PROV.atLocation)
+        if (location, RDF.type, REC.Host) in graph
+    )
+    assert str(graph.value(host, SDO.identifier)) == socket.gethostname()
     assert graph.value(host, REC.os) is not None
     assert str(graph.value(host, REC.runtime)) == platform.python_version()
 

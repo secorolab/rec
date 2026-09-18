@@ -42,7 +42,7 @@ class BaseObserver:
     def log_host_info(self, host_info):
         pass
 
-    def add_agent(self, agent_id, agent_type):
+    def add_agent(self, agent_id, agent_type, name=None):
         pass
 
     def add_activity(self, activity_id, activity_type, associated_with=None):

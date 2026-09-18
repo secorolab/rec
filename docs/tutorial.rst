@@ -43,15 +43,16 @@ file ID and writes it into the archive; do not pass the run ID to the observer.
    )
    result = run.run()
 
-``run()`` marks the run as running, calls ``main()``, and records completion.
-An exception records ``rec:FailedRun``; a keyboard interrupt records
-``rec:InterruptedRun``. The archive contains a PROV agent, activity,
-qualified resource usage, artefact generation, and a QUDT dimensionless
-metric. Resource and artefact timestamps default to the current UTC time.
+``run()`` marks the run as in progress, calls ``main()``, and records completion.
+An exception records the verdict ``failed``; a keyboard interrupt records
+``error``. The archive contains a PROV agent, activity, qualified resource
+usage, artefact generation, and a QUDT dimensionless metric. Resource and
+artefact timestamps default to the current UTC time.
 
-REC stores exactly one lifecycle RDF type at a time:
-``rec:QueuedRun``, ``rec:RunningRun``, ``rec:CompletedRun``,
-``rec:FailedRun``, ``rec:InterruptedRun``, or ``rec:CancelledRun``.
+The run is a ``prov-ext:Execution`` whose lifecycle is an OSLC Automation
+``oslc_auto:state`` (``queued``, ``inProgress``, ``complete``, ``canceled``)
+and, once complete, an ``oslc_auto:verdict`` (``passed``, ``failed``,
+``error``). Both are single-valued and replaced as the run moves on.
 
 Record the next run to a file and MariaDB
 -----------------------------------------
@@ -79,7 +80,7 @@ Synchronise existing archives
 -----------------------------
 
 Use one of the following approaches for file-only archives. Both preserve the
-archive's ``rec:run-id`` and ``rec:file-id``.
+archive's run IRI, whose last segment is the run id.
 
 Import one archive:
 

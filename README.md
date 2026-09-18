@@ -40,9 +40,9 @@ run = CalibrationRun(
 run.run()
 ```
 
-The graph records the lifecycle as RDF types: `rec:QueuedRun`,
-`rec:RunningRun`, `rec:CompletedRun`, `rec:FailedRun`,
-`rec:InterruptedRun`, or `rec:CancelledRun`.
+The run is a `prov-ext:Execution`. Its lifecycle is an OSLC Automation
+`oslc_auto:state` (`queued`, `inProgress`, `complete`, `canceled`) and, once
+complete, an `oslc_auto:verdict` (`passed`, `failed`, `error`).
 
 ## MariaDB
 

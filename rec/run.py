@@ -11,11 +11,8 @@ import traceback
 from typing import Sequence
 from uuid import uuid4
 
-from rdflib import Namespace
-
+from rec.observers import graph_observer
 from rec.observers.base import BaseObserver
-
-REC = Namespace("https://secorolab.github.io/metamodels/rec#")
 
 logger = logging.getLogger(__name__)
 
@@ -259,10 +256,10 @@ class Run:
         for observer in self.observers:
             observer.log_host_info(host_info)
 
-    def add_agent(self, agent_id: str, agent_type: str):
-        """Add a PROV agent with the supplied identifier and RDF type."""
+    def add_agent(self, agent_id: str, agent_type: str, name: str | None = None):
+        """Add a PROV agent with the supplied identifier and RDF type; software agents are named."""
         for observer in self.observers:
-            observer.add_agent(agent_id, agent_type)
+            observer.add_agent(agent_id, agent_type, name)
 
     def add_activity(self, activity_id: str, activity_type: str, associated_with=None):
         """Add a PROV activity and optionally associate it with an agent."""
@@ -329,10 +326,11 @@ class Run:
 
 
 class RunStatus:
-    """REC lifecycle RDF types exposed by :attr:`Run.status`."""
-    QUEUED = REC.QueuedRun
-    RUNNING = REC.RunningRun
-    COMPLETED = REC.CompletedRun
-    FAILED = REC.FailedRun
-    INTERRUPTED = REC.InterruptedRun
-    CANCELLED = REC.CancelledRun
+    """Lifecycle values exposed by :attr:`Run.status`: an OSLC Automation (state, verdict) pair."""
+
+    QUEUED = graph_observer.QUEUED
+    RUNNING = graph_observer.IN_PROGRESS
+    COMPLETED = graph_observer.COMPLETED
+    FAILED = graph_observer.FAILED
+    INTERRUPTED = graph_observer.INTERRUPTED
+    CANCELLED = graph_observer.CANCELLED

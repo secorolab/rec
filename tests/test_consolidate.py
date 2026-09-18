@@ -17,40 +17,36 @@ from rec.consolidate import (
     consolidate_run,
 )
 from rec.observers import FileObserver
-from rec.observers.graph_observer import REC
+from rec.observers.graph_observer import OSLC_AUTO, PROV_EXT
 from rec.run import Run
 
-MS_PROV = Namespace("https://secorolab.github.io/metamodels/motion-spec/prov#")
 TIME = Namespace("http://www.w3.org/2006/time#")
-MODEL = Namespace("https://secorolab.github.io/models/demo/")
 RUN_ID = "run-1"
 RUN_IRI = URIRef(f"https://secorolab.github.io/motion-spec/provenance/run/{RUN_ID}")
 
 RUNTIME_TTL = """
-@prefix ms-prov: <https://secorolab.github.io/metamodels/motion-spec/prov#> .
 @prefix prov: <http://www.w3.org/ns/prov#> .
+@prefix prov-ext: <https://secorolab.github.io/metamodels/prov#> .
 @prefix qkind: <http://qudt.org/vocab/quantitykind/> .
 @prefix qudt: <http://qudt.org/schema/qudt/> .
 @prefix sens: <https://secorolab.github.io/metamodels/robot/sensors#> .
-@prefix sosa: <http://www.w3.org/ns/sosa/> .
 @prefix time: <http://www.w3.org/2006/time#> .
 @prefix unit: <http://qudt.org/vocab/unit/> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 @prefix agent: <https://secorolab.github.io/motion-spec/provenance/agent/> .
 @prefix ent: <https://secorolab.github.io/motion-spec/provenance/entity/run/run-1/> .
 @prefix inst: <https://secorolab.github.io/motion-spec/runtime/instant/run-1/> .
-@prefix occ: <https://secorolab.github.io/motion-spec/runtime/occurrence/run-1/> .
 @prefix run: <https://secorolab.github.io/motion-spec/provenance/run/> .
 @prefix trs: <https://secorolab.github.io/motion-spec/runtime/trs/> .
-@prefix model: <https://secorolab.github.io/models/demo/> .
 
-run:%(run_id)s a ms-prov:TaskExecution ;
+run:%(run_id)s a prov-ext:Execution ;
     time:hasBeginning inst:0 ;
     time:hasEnd inst:2000 ;
     prov:used ent:model_jsonld ;
     prov:wasAssociatedWith agent:controller_process .
 
 ent:model_jsonld a prov:Entity .
+agent:controller_process a prov:Agent .
 
 trs:%(run_id)s a time:TRS ;
     sens:update-rate <https://secorolab.github.io/motion-spec/runtime/quantity/run-1/tick_rate> .
@@ -61,25 +57,10 @@ trs:%(run_id)s a time:TRS ;
     qudt:value 1000.0 .
 
 inst:0 a time:Instant ;
-    time:inTimePosition [ time:hasTRS trs:%(run_id)s ; time:numericPosition %(first)s ] .
+    time:inTimePosition [ time:hasTRS trs:%(run_id)s ; time:numericPosition 0 ] .
 
 inst:2000 a time:Instant ;
     time:inTimePosition [ time:hasTRS trs:%(run_id)s ; time:numericPosition 2000 ] .
-
-occ:m0 a ms-prov:MotionExecution ;
-    time:hasBeginning inst:0 ;
-    time:hasEnd inst:2000 ;
-    prov:used model:motion-slide ;
-    prov:wasAssociatedWith agent:controller_process ;
-    prov:wasInformedBy run:%(run_id)s .
-
-occ:c0 a ms-prov:ConstraintMaintenance ;
-    time:hasBeginning inst:0 ;
-    time:hasEnd inst:2000 ;
-    sosa:hasSimpleResult 0.25 ;
-    prov:used model:press-down ;
-    prov:wasAssociatedWith agent:controller_process ;
-    prov:wasInformedBy occ:m0 .
 """
 
 BDD_TTL = """
@@ -105,16 +86,19 @@ def metamodels_dir():
     return Path(os.getenv("REC_METAMODELS_DIR", Path(__file__).resolve().parents[2] / "metamodels"))
 
 
-def build_run(tmp_path, run_id=RUN_ID, run_iri=RUN_IRI, first="0", bdd_stamp=None):
+def build_run(tmp_path, run_id=RUN_ID, run_iri=RUN_IRI, runtime=True, bdd_stamp=None):
     """Write one archive-shaped run directory and return it."""
     run_dir = tmp_path / "runs" / run_id
     (run_dir / "runtime").mkdir(parents=True)
-    (run_dir / "runtime" / "runtime.ttl").write_text(RUNTIME_TTL % {"run_id": run_id, "first": first})
+    if runtime:
+        (run_dir / "runtime" / "runtime.ttl").write_text(RUNTIME_TTL % {"run_id": run_id})
     if bdd_stamp:
         (run_dir / "runtime" / "bdd-nominal.ttl").write_text(BDD_TTL % {"stamp": bdd_stamp})
     observer = FileObserver(run_dir / "rec.ld.json", run_iri=run_iri)
     run = Run(observers=[observer], run_id=run_id)
     run._emit_started()
+    run.add_agent("https://example.org/agent/operator", "prov:Person")
+    run.log_sources({"path": "model.ld.json"})
     run._emit_completed()
     observer.close()
     return run_dir
@@ -141,21 +125,21 @@ def test_consolidation_writes_the_named_graphs(tmp_path):
 
 def test_one_run_node_carries_both_the_runtime_and_the_lifecycle(tmp_path):
     dataset = consolidated(build_run(tmp_path))
-    assert (RUN_IRI, RDF.type, MS_PROV.TaskExecution) in dataset.graph(RUNTIME_GRAPH)
-    assert (RUN_IRI, REC["run-id"], None) in dataset.graph(REC_GRAPH)
-    assert (RUN_IRI, RDF.type, REC.CompletedRun) in dataset.graph(REC_GRAPH)
+    assert (RUN_IRI, RDF.type, PROV_EXT.Execution) in dataset.graph(RUNTIME_GRAPH)
+    assert dataset.graph(REC_GRAPH).value(RUN_IRI, OSLC_AUTO.state) == OSLC_AUTO.complete
 
 
-def test_subclass_entailment_types_the_occurrences_as_activities(tmp_path):
+def test_a_run_without_a_runtime_record_consolidates_from_its_lifecycle(tmp_path):
+    dataset = consolidated(build_run(tmp_path, runtime=False))
+    assert len(dataset.graph(RUNTIME_GRAPH)) == 0
+    assert dataset.graph(REC_GRAPH).value(RUN_IRI, OSLC_AUTO.verdict) == OSLC_AUTO.passed
+
+
+def test_subclass_entailment_types_the_run_as_an_activity(tmp_path):
     dataset = consolidated(build_run(tmp_path))
     runtime, inferred = dataset.graph(RUNTIME_GRAPH), dataset.graph(INFERRED_GRAPH)
-    occurrences = set(runtime.subjects(RDF.type, MS_PROV.MotionExecution)) | set(
-        runtime.subjects(RDF.type, MS_PROV.ConstraintMaintenance)
-    )
-    assert occurrences
-    for occurrence in occurrences:
-        assert (occurrence, RDF.type, PROV.Activity) not in runtime
-        assert (occurrence, RDF.type, PROV.Activity) in inferred
+    assert (RUN_IRI, RDF.type, PROV.Activity) not in runtime
+    assert (RUN_IRI, RDF.type, PROV.Activity) in inferred
 
 
 def test_acceptance_observations_gain_the_runs_tick_position(tmp_path):
@@ -184,7 +168,7 @@ def test_an_old_vocabulary_runtime_graph_is_refused_with_the_migration_hint(tmp_
     assert not (run_dir / "provenance.trig").exists()
 
 
-def test_a_run_id_that_matches_without_the_iri_is_reported_not_patched(tmp_path):
+def test_a_runtime_naming_another_run_is_reported_not_patched(tmp_path):
     run_dir = build_run(tmp_path, run_iri=URIRef("https://secorolab.github.io/rec/run/run-1"))
     with pytest.raises(ConsolidationError) as failure:
         consolidate_run(run_dir, metamodels_dir=metamodels_dir())
@@ -193,7 +177,11 @@ def test_a_run_id_that_matches_without_the_iri_is_reported_not_patched(tmp_path)
     assert not (run_dir / "provenance.trig").exists()
 
 
-def test_a_negative_tick_position_fails_validation(tmp_path):
-    run_dir = build_run(tmp_path, first="-1")
+def test_a_run_without_an_agent_fails_validation(tmp_path):
+    run_dir = build_run(tmp_path, runtime=False)
+    graph = Dataset(default_union=True)
+    graph.parse(run_dir / "rec.ld.json", format="json-ld")
+    graph.remove((None, PROV.wasAssociatedWith, None))
+    (run_dir / "rec.ld.json").write_text(graph.serialize(format="json-ld"))
     with pytest.raises(ConsolidationError, match="SHACL"):
         consolidate_run(run_dir, metamodels_dir=metamodels_dir())

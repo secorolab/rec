@@ -18,7 +18,7 @@ Observers
    :members:
    :inherited-members:
 
-Lifecycle types
----------------
+Lifecycle values
+----------------
 
 .. autoclass:: rec.run.RunStatus
