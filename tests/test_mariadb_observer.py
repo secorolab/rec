@@ -13,7 +13,7 @@ from rdflib import Graph
 from rdflib.namespace import PROV, RDF
 
 from rec.observers import FileObserver, MariaDBObserver
-from rec.observers.graph_observer import REC, REC_RUN
+from rec.observers.graph_observer import OSLC_AUTO, PROV_EXT, REC_RUN
 from rec.run import Run
 
 
@@ -64,7 +64,8 @@ def test_mariadb_only_run(database):
 
     graph = stored_graph(observer, "db-only")
     node = REC_RUN["db-only"]
-    assert (node, RDF.type, REC.CompletedRun) in graph
+    assert (node, RDF.type, PROV_EXT.Execution) in graph
+    assert graph.value(node, OSLC_AUTO.verdict) == OSLC_AUTO.passed
     assert graph.value(node, PROV.atLocation) is None
 
 
@@ -94,7 +95,7 @@ def test_file_and_mariadb_share_the_archive_location(database, tmp_path):
 
     graph = stored_graph(db, "both")
     node = REC_RUN["both"]
-    assert str(graph.value(graph.value(node, PROV.atLocation), REC.path)).endswith("run.jsonld")
+    assert str(graph.value(node, PROV.atLocation)).endswith("run.jsonld")
     db.cursor.execute(
         f"SELECT run_id, archive_path FROM {db.file_sources_table} WHERE run_id = ?",
         ("both",),
@@ -111,7 +112,7 @@ def test_sync_file_preserves_the_archive_location(database, tmp_path):
 
     graph = stored_graph(db, "file-only")
     node = REC_RUN["file-only"]
-    assert str(graph.value(graph.value(node, PROV.atLocation), REC.path)).endswith("run.jsonld")
+    assert str(graph.value(node, PROV.atLocation)).endswith("run.jsonld")
 
 
 def test_sync_files_uses_started_at_time_order_and_cursor(database, tmp_path):

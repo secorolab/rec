@@ -65,20 +65,8 @@ class MariaDBObserver(GraphObserver):
             "synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
             "INDEX (started_at))"
         )
-        super().__init__(run_id or self._active_run_id() or f"run-{uuid4()}")
+        super().__init__(run_id or f"run-{uuid4()}")
         self._load_existing()
-
-    def query_active_run(self):
-        """Return one currently running database run, if present."""
-        return self._active_run_id()
-
-    def _active_run_id(self):
-        self.cursor.execute(
-            f"SELECT run_id FROM {self.table} WHERE status = ? LIMIT 1",
-            (str(OSLC_AUTO.inProgress),),
-        )
-        row = self.cursor.fetchone()
-        return row[0] if row else None
 
     def _load_existing(self):
         self.cursor.execute(f"SELECT jsonld FROM {self.table} WHERE run_id = ?", (self.run_id,))

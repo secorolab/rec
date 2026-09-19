@@ -7,56 +7,68 @@ The live observers never merge. This is the one-shot batch step that runs after 
 lifecycle event: it reads the run's documents, checks that they describe one run node,
 materialises the subclass entailments the axioms license, validates the spine and writes
 ``provenance.trig``. It rewrites no input.
-
-The shared run IRI is the contract. When the runtime record names a different run than the
-lifecycle record that is a defect report, never a merge input -- consolidation refuses.
 """
 
 import json
 import os
-from datetime import datetime
 from pathlib import Path
 
 from pyshacl import validate
-from rdflib import BNode, Dataset, Graph, Literal, Namespace, URIRef
-from rdflib.namespace import RDF, RDFS, SOSA, XSD, split_uri
+from rdflib import Dataset, Graph, URIRef
+from rdflib.namespace import RDF, RDFS
 
-from rec.observers.graph_observer import PROV_EXT, REC, run_node
-
-SENS = Namespace("https://secorolab.github.io/metamodels/robot/sensors#")
-QUDT = Namespace("http://qudt.org/schema/qudt/")
-TIME = Namespace("http://www.w3.org/2006/time#")
+from rec.observers.graph_observer import run_node
 
 REC_GRAPH = URIRef("urn:rec")
-RUNTIME_GRAPH = URIRef("urn:runtime")
-BDD_GRAPH = URIRef("urn:bdd")
 GENERATION_GRAPH = URIRef("urn:generation")
 DESIGN_GRAPH = URIRef("urn:design")
 INFERRED_GRAPH = URIRef("urn:inferred")
 
 CONSOLIDATED = "provenance.trig"
 METAMODELS_URL = "https://secorolab.github.io/metamodels/"
-GENERATION_DOCUMENTS = ("motion-spec.ld.json", "dsl.ld.json", "coord-dsl.ld.json")
+GENERATION_DOCUMENT = "provenance.ld.json"
 # The subclass axioms live in the shapes files -- one .json and one .shacl.ttl per
 # vocabulary is the metamodels layout; _entail reads only the rdfs:subClassOf triples.
 AXIOMS = (("prov-extension.shacl.ttl",), ("rec", "rec.shacl.ttl"))
-# The runtime and the lifecycle are what these shapes describe. The BDD graph is deliberately
-# out: sens:ObservationShape demands a sosa:madeBySensor no acceptance fluent has. The design
-# and generation documents keep their own gates in the archive.
+# The lifecycle is what these shapes describe. The design and generation documents keep their
+# own gates in the archive.
 SHAPES = (
     ("prov.shacl.ttl",),
     ("prov-extension.shacl.ttl",),
     ("rec", "rec.shacl.ttl"),
     ("robot", "sensors.shacl.ttl"),
 )
-VALIDATED_GRAPHS = (REC_GRAPH, RUNTIME_GRAPH, INFERRED_GRAPH)
-# A sim clock counts from the simulator's own epoch, so its instants land in 1970. A wall clock
-# never does, and its stamp says nothing about a tick.
-SIM_EPOCH_YEAR = 2000
+VALIDATED_GRAPHS = (REC_GRAPH, INFERRED_GRAPH)
 
 
 class ConsolidationError(RuntimeError):
     """One run's documents do not consolidate into a single dataset."""
+
+
+def consolidate_dataset(
+    run_dir: Path,
+    generation_dir: Path | None = None,
+    metamodels_dir: Path | None = None,
+) -> Dataset:
+    """Return one run's consolidated, entailed and validated named-graph dataset."""
+    run_dir = Path(run_dir)
+    generation_dir = Path(generation_dir) if generation_dir else run_dir.parent.parent
+    metamodels_dir = Path(metamodels_dir) if metamodels_dir else _metamodels_dir(run_dir)
+
+    dataset = Dataset()
+    generated = generation_dir / "generated"
+    documents = (
+        (REC_GRAPH, [_required(run_dir / "rec.ld.json")]),
+        (GENERATION_GRAPH, [generated / GENERATION_DOCUMENT]),
+        (DESIGN_GRAPH, sorted((generated / "model").glob("*.ld.json"))),
+    )
+    for name, paths in documents:
+        _load(dataset, name, paths, metamodels_dir)
+
+    _verified_run(dataset)
+    _entail(dataset, dataset.graph(INFERRED_GRAPH), metamodels_dir)
+    _validate(dataset, metamodels_dir)
+    return dataset
 
 
 def consolidate_run(
@@ -65,29 +77,8 @@ def consolidate_run(
     metamodels_dir: Path | None = None,
 ) -> Path:
     """Write ``run_dir/provenance.trig`` and return its path."""
-    run_dir = Path(run_dir)
-    generation_dir = Path(generation_dir) if generation_dir else run_dir.parent.parent
-    metamodels_dir = Path(metamodels_dir) if metamodels_dir else _metamodels_dir(run_dir)
-
-    dataset = Dataset()
-    provenance = generation_dir / "generated" / "provenance"
-    documents = (
-        (REC_GRAPH, [_required(run_dir / "rec.ld.json")], "json-ld"),
-        (RUNTIME_GRAPH, [run_dir / "runtime" / "runtime.ttl"], "turtle"),
-        (BDD_GRAPH, sorted((run_dir / "runtime").glob("bdd-*.ttl")), "turtle"),
-        (GENERATION_GRAPH, [provenance / name for name in GENERATION_DOCUMENTS], "json-ld"),
-        (DESIGN_GRAPH, sorted((generation_dir / "generated" / "model").glob("*.ld.json")), "json-ld"),
-    )
-    for name, paths, fmt in documents:
-        _load(dataset, name, paths, fmt, metamodels_dir)
-
-    run = _verified_run(dataset)
-    inferred = dataset.graph(INFERRED_GRAPH)
-    _entail(dataset, inferred, metamodels_dir)
-    _enrich_bdd_ticks(dataset, inferred, run)
-    _validate(dataset, metamodels_dir)
-
-    destination = run_dir / CONSOLIDATED
+    dataset = consolidate_dataset(run_dir, generation_dir, metamodels_dir)
+    destination = Path(run_dir) / CONSOLIDATED
     dataset.serialize(destination=str(destination), format="trig")
     return destination
 
@@ -98,7 +89,7 @@ def _required(path: Path) -> Path:
     return path
 
 
-def _load(dataset: Dataset, name: URIRef, paths, fmt: str, metamodels_dir: Path) -> None:
+def _load(dataset: Dataset, name: URIRef, paths, metamodels_dir: Path) -> None:
     """Parse ``paths`` into the named graph ``name``, skipping the documents a run may lack."""
     paths = [path for path in paths if path.exists()]
     if not paths:
@@ -107,14 +98,11 @@ def _load(dataset: Dataset, name: URIRef, paths, fmt: str, metamodels_dir: Path)
     for path in paths:
         # A generated JSON-LD document may be a dataset; its named graphs flatten into ours.
         parsed = Dataset(default_union=True)
-        if fmt == "json-ld":
-            parsed.parse(
-                data=_localised(path, metamodels_dir),
-                format=fmt,
-                base=path.resolve().as_uri(),
-            )
-        else:
-            parsed.parse(str(path), format=fmt)
+        parsed.parse(
+            data=_localised(path, metamodels_dir),
+            format="json-ld",
+            base=path.resolve().as_uri(),
+        )
         for triple in parsed.triples((None, None, None)):
             graph.add(triple)
 
@@ -158,28 +146,11 @@ def _metamodels_dir(run_dir: Path) -> Path:
 
 
 def _verified_run(dataset: Dataset) -> URIRef:
-    """Return the one run node the lifecycle document describes, and the runtime agrees on."""
+    """Return the one run node the lifecycle document describes."""
     run = run_node(dataset.graph(REC_GRAPH))
     if run is None:
         raise ConsolidationError("rec.ld.json describes no run: no node carries an oslc_auto:state")
-    runtime = dataset.graph(RUNTIME_GRAPH)
-    if not len(runtime):
-        return run
-    runs = set(runtime.subjects(RDF.type, PROV_EXT.Execution))
-    if not runs:
-        raise ConsolidationError(
-            "runtime.ttl declares no prov-ext:Execution: this archive predates the run "
-            "vocabulary -- regenerate with --recover-runtime-ttl"
-        )
-    if len(runs) > 1:
-        raise ConsolidationError(f"runtime.ttl declares {len(runs)} runs: {sorted(map(str, runs))}")
-    recorded = runs.pop()
-    if recorded == run:
-        return run
-    raise ConsolidationError(
-        f"the runtime and the lifecycle name different runs: runtime says <{recorded}>, "
-        f"rec.ld.json says <{run}> -- the shared IRI is the contract, consolidation does not patch it"
-    )
+    return run
 
 
 def _entail(dataset: Dataset, inferred: Graph, metamodels_dir: Path) -> None:
@@ -205,57 +176,6 @@ def _entail(dataset: Dataset, inferred: Graph, metamodels_dir: Path) -> None:
     for triple in closure.triples((None, RDF.type, None)):
         if triple[2] in superclasses:
             inferred.add(triple)
-
-
-def _enrich_bdd_ticks(dataset: Dataset, inferred: Graph, run: URIRef) -> None:
-    """Position each acceptance observation on the run's tick scale.
-
-    An observation's sosa:resultTime is the xsd:dateTime SOSA prescribes, so the tick goes on a
-    sosa:phenomenonTime instant -- the SOSA property whose range is a temporal entity -- rather
-    than displacing a literal that is already correct.
-    """
-    bdd = dataset.graph(BDD_GRAPH)
-    runtime = dataset.graph(RUNTIME_GRAPH)
-    if not len(bdd) or not len(runtime):
-        return
-    trs, rate = _tick_scale(runtime, run)
-    if trs is None or rate is None:
-        return
-    instants = _instant_namespace(runtime)
-    for observation, stamp in bdd.subject_objects(SOSA.resultTime):
-        if not isinstance(stamp, Literal) or stamp.datatype != XSD.dateTime:
-            continue
-        moment = stamp.toPython()
-        if not isinstance(moment, datetime) or moment.year >= SIM_EPOCH_YEAR:
-            continue  # a wall clock says nothing about a tick
-        tick = round(moment.timestamp() * rate)
-        instant = instants[str(tick)]
-        inferred.add((observation, SOSA.phenomenonTime, instant))
-        # The tick the run already recorded is that instant; only an unrecorded one is placed.
-        if (instant, TIME.inTimePosition, None) in runtime:
-            continue
-        position = BNode()
-        inferred.add((instant, RDF.type, TIME.Instant))
-        inferred.add((instant, TIME.inTimePosition, position))
-        inferred.add((position, TIME.numericPosition, Literal(tick)))
-        inferred.add((position, TIME.hasTRS, trs))
-
-
-def _tick_scale(runtime: Graph, run: URIRef):
-    """Return the run's time reference system and its tick rate in Hz."""
-    beginning = runtime.value(run, TIME.hasBeginning)
-    position = runtime.value(beginning, TIME.inTimePosition) if beginning else None
-    trs = runtime.value(position, TIME.hasTRS) if position else None
-    quantity = runtime.value(trs, SENS["update-rate"]) if trs else None
-    rate = runtime.value(quantity, QUDT.value) if quantity else None
-    return trs, float(rate) if rate is not None else None
-
-
-def _instant_namespace(runtime: Graph) -> Namespace:
-    """The run's instant IRIs, so a tick position names the instant the runtime already names."""
-    for instant in runtime.subjects(RDF.type, TIME.Instant):
-        return Namespace(split_uri(instant)[0])
-    raise ConsolidationError("runtime.ttl names no time:Instant to position the acceptance record on")
 
 
 def _validate(dataset: Dataset, metamodels_dir: Path) -> None:

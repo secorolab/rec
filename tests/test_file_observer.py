@@ -70,6 +70,14 @@ def test_prov_relations_replace_the_rec_collections(tmp_path):
     assert str(graph.value(REC_RUN["run-1/metric/frames/0"], RDFS.label)) == "frames"
 
 
+def test_recording_a_file_hands_back_the_entity_it_minted(tmp_path):
+    """The caller needs the entity IRI to relate the file to activities of its own."""
+    run = Run(observers=[FileObserver(tmp_path / "rec.jsonld")], run_id="run-1")
+    run._emit_started()
+    assert run.add_resource("config.json") == REC_RUN["run-1/entity/config.json"]
+    assert run.add_artefact("result.bin") == REC_RUN["run-1/entity/result.bin"]
+
+
 def test_files_carry_a_checksum_and_size_in_dcat_form(tmp_path):
     _path, graph = recorded_graph(tmp_path)
     artefact = REC_RUN["run-1/entity/result.bin"]

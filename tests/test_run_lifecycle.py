@@ -91,7 +91,6 @@ def test_a_heartbeat_keeps_only_its_latest_time(tmp_path):
     activity = REC_RUN["run-9"]
     assert len(list(graph.objects(activity, REC["heartbeat-time"]))) == 1
     assert str(graph.value(activity, REC.result)) == "done"
-    assert observer.query_active_run() == "run-9"
 
 
 def test_stepless_scalars_do_not_overwrite(tmp_path):
