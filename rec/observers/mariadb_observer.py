@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from rdflib import Graph
 from rdflib.namespace import PROV
 
-from rec.observers.graph_observer import CONTEXT, OSLC_AUTO, GraphObserver, run_id_of, run_node
+from rec.observers.graph_observer import OSLC_AUTO, GraphObserver, local_name, locked, run_node, serialize
 
 
 class MariaDBObserver(GraphObserver):
@@ -87,13 +87,14 @@ class MariaDBObserver(GraphObserver):
         """Associate this live database run with its file-backed source."""
         self.archive_path = str(archive_path)
 
+    @locked
     def sync_file(self, path):
         """Import one file-backed run without changing its REC identities."""
         graph = Graph().parse(path, format="json-ld")
         run = run_node(graph)
         if run is None:
             raise ValueError("file describes no run")
-        run_id = run_id_of(run)
+        run_id = local_name(run)
         started_at = graph.value(run, PROV.startedAtTime)
         if started_at is None:
             raise ValueError("file has no prov:startedAtTime")
@@ -103,7 +104,7 @@ class MariaDBObserver(GraphObserver):
     def sync_files(self, directory, started_after=None):
         """Import archive files in start-time order, optionally after a cursor."""
         files = []
-        for path in sorted(Path(directory).rglob("*.jsonld")):
+        for path in sorted(Path(directory).rglob("*.ld.json")):
             graph = Graph().parse(path, format="json-ld")
             run = run_node(graph)
             started_at = graph.value(run, PROV.startedAtTime) if run else None
@@ -119,7 +120,7 @@ class MariaDBObserver(GraphObserver):
         self.cursor.execute(
             f"INSERT INTO {self.table} (run_id, status, jsonld) VALUES (?, ?, ?) "
             "ON DUPLICATE KEY UPDATE status = VALUES(status), jsonld = VALUES(jsonld)",
-            (run_id, status, graph.serialize(format="json-ld", context=CONTEXT, auto_compact=True)),
+            (run_id, status, serialize(graph)),
         )
         if run_id == self.run_id and self.db_id is None:
             self.db_id = self._db_id(run_id)
@@ -137,6 +138,7 @@ class MariaDBObserver(GraphObserver):
             (run_id, str(archive_path), started_at),
         )
 
+    @locked
     def close(self):
         """Flush a live run, then close the database cursor and connection."""
         if self.graph.value(self.run, OSLC_AUTO.state) is not None:

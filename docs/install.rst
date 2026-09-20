@@ -20,7 +20,7 @@ Quick run
 ---------
 
 Save this as ``quick_run.py`` and run ``python quick_run.py``. It creates a
-JSON-LD archive at ``runs/quick/rec.jsonld``:
+JSON-LD archive at ``runs/quick/rec.ld.json``:
 
 .. code-block:: python
 
@@ -34,9 +34,13 @@ JSON-LD archive at ``runs/quick/rec.jsonld``:
 
 
    QuickRun(
-       observers=[FileObserver("runs/quick/rec.jsonld")],
+       observers=[FileObserver("runs/quick/rec.ld.json")],
        run_id="quick",
    ).run()
+
+The archive records the lifecycle, host and result. It names no agent and
+nothing the run used, so it does not validate against the metamodel; the
+:doc:`tutorial` shows a run that does.
 
 MariaDB connection
 ------------------

@@ -12,10 +12,12 @@ import pytest
 from rdflib import Graph
 from rdflib.namespace import PROV, RDF
 
-from rec.observers import FileObserver, MariaDBObserver
+from rec.observers import FileObserver
 from rec.observers.graph_observer import OSLC_AUTO, PROV_EXT, REC_RUN
 from rec.run import Run
 
+pytest.importorskip("mariadb", reason="the MariaDB driver is an optional extra")
+from rec.observers import MariaDBObserver  # noqa: E402
 
 TEST_DATABASE = os.getenv("REC_TEST_MARIADB_DATABASE")
 pytestmark = pytest.mark.skipif(
@@ -86,7 +88,7 @@ def test_runs_get_sequential_database_numbers(database, tmp_path):
 
 
 def test_file_and_mariadb_share_the_archive_location(database, tmp_path):
-    path = tmp_path / "run.jsonld"
+    path = tmp_path / "run.ld.json"
     db = database()
     file = FileObserver(path)
     run = Run(observers=[file, db], run_id="both")
@@ -95,7 +97,7 @@ def test_file_and_mariadb_share_the_archive_location(database, tmp_path):
 
     graph = stored_graph(db, "both")
     node = REC_RUN["both"]
-    assert str(graph.value(node, PROV.atLocation)).endswith("run.jsonld")
+    assert str(graph.value(node, PROV.atLocation)).endswith("run.ld.json")
     db.cursor.execute(
         f"SELECT run_id, archive_path FROM {db.file_sources_table} WHERE run_id = ?",
         ("both",),
@@ -104,7 +106,7 @@ def test_file_and_mariadb_share_the_archive_location(database, tmp_path):
 
 
 def test_sync_file_preserves_the_archive_location(database, tmp_path):
-    path = tmp_path / "run.jsonld"
+    path = tmp_path / "run.ld.json"
     file = file_run(path, "file-only", datetime(2026, 1, 1, tzinfo=UTC))
     db = database()
 
@@ -112,19 +114,19 @@ def test_sync_file_preserves_the_archive_location(database, tmp_path):
 
     graph = stored_graph(db, "file-only")
     node = REC_RUN["file-only"]
-    assert str(graph.value(node, PROV.atLocation)).endswith("run.jsonld")
+    assert str(graph.value(node, PROV.atLocation)).endswith("run.ld.json")
 
 
 def test_sync_files_uses_started_at_time_order_and_cursor(database, tmp_path):
-    early = file_run(tmp_path / "early.jsonld", "early", datetime(2026, 1, 1, tzinfo=UTC))
-    late = file_run(tmp_path / "late.jsonld", "late", datetime(2026, 1, 2, tzinfo=UTC))
+    early = file_run(tmp_path / "early.ld.json", "early", datetime(2026, 1, 1, tzinfo=UTC))
+    late = file_run(tmp_path / "late.ld.json", "late", datetime(2026, 1, 2, tzinfo=UTC))
     db = database()
     synced = []
     sync_file = db.sync_file
     db.sync_file = lambda path: (synced.append(path.name), sync_file(path))[1]
 
     assert db.sync_files(tmp_path) == 2
-    assert synced == ["early.jsonld", "late.jsonld"]
+    assert synced == ["early.ld.json", "late.ld.json"]
     assert db.sync_files(tmp_path, started_after=datetime(2026, 1, 1, 12, tzinfo=UTC)) == 1
     db.cursor.execute(f"SELECT run_id FROM {db.file_sources_table} ORDER BY started_at")
     assert [row[0] for row in db.cursor] == [early.run_id, late.run_id]

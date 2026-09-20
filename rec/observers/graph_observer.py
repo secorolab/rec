@@ -4,7 +4,10 @@
 
 """Shared direct-RDF implementation for REC storage backends."""
 
+import functools
+import json
 import re
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -35,7 +38,7 @@ UPSTREAM = {
     "spdx": str(SPDX),
 }
 PREFIXES = {"rec": str(REC), **UPSTREAM}
-CONTEXT = [REC_CONTEXT, UPSTREAM]
+CONTEXT = [REC_CONTEXT, PREFIXES]
 
 HOST_FIELDS = {
     "hostname": SDO.identifier,
@@ -53,15 +56,27 @@ INTERRUPTED = (OSLC_AUTO.complete, OSLC_AUTO.error)
 CANCELLED = (OSLC_AUTO.canceled, OSLC_AUTO.unavailable)
 
 
+def locked(method):
+    """Serialise graph changes and writes: the heartbeat thread shares the graph with the run."""
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class GraphObserver(BaseObserver):
     """Build the backend-independent REC graph directly from run events."""
 
     def __init__(self, run_id, run_iri=None):
         self.run_id = str(run_id)
-        # A caller that already minted the run elsewhere (motion-spec) passes its IRI, so its
-        # runtime graph and this document describe one node instead of two.
+        # A caller that already minted the run elsewhere passes its IRI, so its own graph and
+        # this document describe one node instead of two.
         self.run_iri = URIRef(run_iri) if run_iri else None
         self.graph = Graph()
+        self._lock = threading.RLock()
         self._metric_steps = {}
         self._archive = None
         for prefix, namespace in PREFIXES.items():
@@ -76,12 +91,14 @@ class GraphObserver(BaseObserver):
         """Return an instance IRI for this run's ``segments``."""
         return REC_RUN[f"{_slug(self.run_id)}/" + "/".join(_slug(segment) for segment in segments)]
 
+    @locked
     def log_queued_run(self, run_id: str, queued_time: datetime):
         """Record ``run_id`` as a REC run queued at ``queued_time``."""
         self._set_run(run_id, QUEUED)
         self.graph.set((self.run, REC["queued-time"], _time(queued_time)))
         self._persist()
 
+    @locked
     def log_started_run(self, run_id: str, started_time: datetime, trigger=None, starter=None) -> str:
         """Record the start time, its optional trigger and starter, and return the run ID."""
         self._set_run(run_id, IN_PROGRESS)
@@ -91,6 +108,7 @@ class GraphObserver(BaseObserver):
         self._persist()
         return self.run_id
 
+    @locked
     def log_run_heartbeat(self, beat_time: datetime, result: object | None):
         """Record the latest heartbeat and the run's result so far."""
         self.graph.set((self.run, REC["heartbeat-time"], _time(beat_time)))
@@ -98,65 +116,42 @@ class GraphObserver(BaseObserver):
             self.graph.set((self.run, REC.result, Literal(result)))
         self._persist()
 
+    @locked
     def log_cancelled_run(self, cancelled_time: datetime):
         """Record cancellation at ``cancelled_time``."""
         self._finish(CANCELLED, cancelled_time)
 
+    @locked
     def log_completed_run(self, completed_time: datetime):
         """Record successful completion at ``completed_time``."""
         self._finish(COMPLETED, completed_time)
 
+    @locked
     def log_interrupted_run(self, interrupted_time: datetime, fail_trace: str | None = None):
         """Record interruption at ``interrupted_time`` with its optional stacktrace."""
         self._finish(INTERRUPTED, interrupted_time, fail_trace)
 
+    @locked
     def log_failed_run(self, failed_time: datetime, fail_trace: str | None = None):
         """Record failure at ``failed_time`` with its optional stacktrace."""
         self._finish(FAILED, failed_time, fail_trace)
 
-    def log_sources(self, sources):
-        """Record source-file rows containing ``path`` and optional file metadata."""
-        for source in _rows(sources):
-            entity, _ = self._entity(
-                source.get("path"),
-                source.get("label"),
-                source.get("sha256"),
-                source.get("size_bytes"),
-                source.get("archive_path") or source.get("archivePath"),
-            )
-            self.graph.add((self.run, PROV.used, entity))
+    @locked
+    def add_software(self, name, version=None, commit=None, repository=None):
+        """One software package the run ran with, a software agent described with schema.org terms."""
+        agent = self._scoped("software", name)
+        self.graph.add((self.run, PROV.wasAssociatedWith, agent))
+        self.graph.add((agent, RDF.type, PROV.SoftwareAgent))
+        self.graph.add((agent, RDF.type, PROV.Agent))
+        self._literal(agent, SDO.name, name)
+        self._literal(agent, SDO.softwareVersion, version)
+        self._literal(agent, SDO.identifier, commit)
+        url = _url(repository)
+        if url is not None:
+            self.graph.set((agent, SDO.codeRepository, url))
         self._persist()
 
-    def log_repositories(self, repositories):
-        """Record each checked-out repository as a software agent the run is associated with."""
-        for row in _rows(repositories):
-            name = row.get("name") or row.get("path")
-            if not name:
-                continue
-            self._software_agent(
-                self._scoped("repository", name),
-                row.get("name") or name,
-                version=None,
-                commit=row.get("commit") or row.get("revision") or row.get("tag"),
-                repository=_url(row.get("url") or row.get("path")),
-            )
-        self._persist()
-
-    def log_dependencies(self, dependencies):
-        """Record each dependency as a software agent the run is associated with."""
-        for row in _rows(dependencies):
-            name = row.get("name") or row.get("label")
-            if not name:
-                continue
-            self._software_agent(
-                self._scoped("dependency", name),
-                name,
-                version=row.get("version") or row.get("hasVersion"),
-                commit=None,
-                repository=None,
-            )
-        self._persist()
-
+    @locked
     def log_host_info(self, host_info):
         """Record the host the run took place on, as one of its locations."""
         host = self._scoped("host")
@@ -166,6 +161,7 @@ class GraphObserver(BaseObserver):
             self._literal(host, predicate, (host_info or {}).get(key))
         self._persist()
 
+    @locked
     def add_agent(self, agent_id, agent_type, name=None):
         """Add a PROV agent to the run; a software agent needs its ``name``."""
         agent = _iri(agent_id)
@@ -176,6 +172,7 @@ class GraphObserver(BaseObserver):
         self._literal(agent, SDO.name, name)
         self._persist()
 
+    @locked
     def add_activity(self, activity_id, activity_type, associated_with=None):
         """Add a PROV activity and optionally associate it with an agent."""
         activity = _iri(activity_id)
@@ -187,11 +184,12 @@ class GraphObserver(BaseObserver):
             self.graph.add((activity, PROV.wasAssociatedWith, _iri(associated_with)))
         self._persist()
 
+    @locked
     def add_resource(self, path, used_by, used_at, label=None, sha256=None, size_bytes=None, archive_path=None):
         """Record a PROV entity used by an activity at a specific time, and return its IRI."""
         entity, slug = self._entity(path, label, sha256, size_bytes, archive_path)
         activity = _iri(used_by or self.run)
-        usage = self._scoped("usage", _local(activity), slug)
+        usage = self._scoped("usage", local_name(activity), slug)
         self.graph.add((activity, PROV.used, entity))
         self.graph.add((activity, PROV.qualifiedUsage, usage))
         self.graph.add((usage, RDF.type, PROV.Usage))
@@ -200,6 +198,7 @@ class GraphObserver(BaseObserver):
         self._persist()
         return entity
 
+    @locked
     def add_artefact(self, path, generated_by, generated_at, label=None, sha256=None, size_bytes=None, archive_path=None):
         """Record a PROV entity generated by an activity at a specific time, and return its IRI."""
         entity, slug = self._entity(path, label, sha256, size_bytes, archive_path)
@@ -213,6 +212,7 @@ class GraphObserver(BaseObserver):
         self._persist()
         return entity
 
+    @locked
     def log_scalar(self, metric_name, value, step=None):
         """Record a dimensionless QUDT metric at ``step``, auto-numbered when omitted."""
         if step is None:
@@ -229,22 +229,15 @@ class GraphObserver(BaseObserver):
         self.graph.set((metric, PROV.generatedAtTime, _time(datetime.now(UTC))))
         self._persist()
 
-    def metrics(self):
-        """The metric nodes this run generated."""
-        return [
-            node
-            for node in self.graph.subjects(PROV.wasGeneratedBy, self.run)
-            if (node, RDF.type, REC.Metric) in self.graph
-        ]
-
     def _next_step(self, metric_name):
         """Return the next auto-increment step for ``metric_name``."""
         if metric_name not in self._metric_steps:
             # the JSON-LD context drops xsd:string, so match labels by value
             recorded = [
                 int(step)
-                for metric in self.metrics()
-                if str(self.graph.value(metric, RDFS.label)) == str(metric_name)
+                for metric in self.graph.subjects(PROV.wasGeneratedBy, self.run)
+                if (metric, RDF.type, REC.Metric) in self.graph
+                and str(self.graph.value(metric, RDFS.label)) == str(metric_name)
                 for step in self.graph.objects(metric, REC.step)
             ]
             self._metric_steps[metric_name] = max(recorded) + 1 if recorded else 0
@@ -252,13 +245,10 @@ class GraphObserver(BaseObserver):
         self._metric_steps[metric_name] = step + 1
         return step
 
+    @locked
     def close(self):
         """Flush the current graph to the storage backend."""
         self._persist()
-
-    def serialize(self):
-        """Return the current REC graph as compact JSON-LD."""
-        return self.graph.serialize(format="json-ld", context=CONTEXT, auto_compact=True)
 
     def _persist(self):
         raise NotImplementedError
@@ -305,21 +295,11 @@ class GraphObserver(BaseObserver):
         self._archive = archive
         self.graph.add((self.run, PROV.atLocation, archive))
 
-    def _software_agent(self, agent, name, version, commit, repository):
-        """One software package the run is associated with, described with schema.org terms."""
-        self.graph.add((self.run, PROV.wasAssociatedWith, agent))
-        self.graph.add((agent, RDF.type, PROV.SoftwareAgent))
-        self.graph.add((agent, RDF.type, PROV.Agent))
-        self._literal(agent, SDO.name, name)
-        self._literal(agent, SDO.softwareVersion, version)
-        self._literal(agent, SDO.identifier, commit)
-        if repository is not None:
-            self.graph.set((agent, SDO.codeRepository, repository))
-
     def _entity(self, path, label, sha256, size_bytes, archive_path=None):
         """Add one file entity, identified by its archive-relative path; return it and that slug."""
         location = archive_path or path
-        slug = _path_slug(location)
+        # A file's identity is its path without traversal or anchor, flattened to one segment.
+        slug = _slug("_".join(part for part in Path(location).parts if part not in ("..", ".", "/")))
         entity = self._scoped("entity", slug)
         self.graph.add((entity, RDF.type, PROV.Entity))
         if sha256 is not None:
@@ -344,9 +324,8 @@ def _rows(value):
 
 
 def _iri(value):
+    """A full IRI, or a ``prov:`` term; instances never live in the metamodel namespace."""
     text = str(value)
-    if text.startswith("rec:"):
-        return REC[text.removeprefix("rec:")]
     if text.startswith("prov:"):
         return PROV[text.removeprefix("prov:")]
     return URIRef(text)
@@ -356,13 +335,8 @@ def _slug(value):
     return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("_") or "item"
 
 
-def _path_slug(value):
-    """Identity of a file: its path without traversal or anchor, flattened to one IRI segment."""
-    return _slug("_".join(part for part in Path(value).parts if part not in ("..", ".", "/")))
-
-
-def _local(iri):
-    """Name the tail of an IRI, so a derived node does not embed a whole namespace."""
+def local_name(iri):
+    """The last segment of an IRI: a run's id, or the name a derived node carries."""
     try:
         return split_uri(URIRef(str(iri)))[1]
     except ValueError:
@@ -390,11 +364,13 @@ def _time(value):
     return Literal(value.isoformat() if hasattr(value, "isoformat") else value, datatype=XSD.dateTime)
 
 
+def serialize(graph):
+    """JSON-LD compacted with the prefixes alone; the published context is named, never fetched."""
+    document = json.loads(graph.serialize(format="json-ld", context=PREFIXES, auto_compact=True))
+    document["@context"] = CONTEXT
+    return json.dumps(document, indent=2)
+
+
 def run_node(graph):
     """The one run a REC document describes: the subject carrying an OSLC state."""
     return next(graph.subjects(OSLC_AUTO.state, None), None)
-
-
-def run_id_of(run):
-    """A run's id is the last segment of its IRI."""
-    return _local(run)

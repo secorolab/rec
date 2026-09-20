@@ -20,16 +20,16 @@ ACTIVITY = "https://example.org/activity/controller"
 
 def recorded_graph(tmp_path, run_id="run-1", run_iri=None):
     """Create one completed REC graph with generic provenance."""
-    path = tmp_path / "rec.jsonld"
+    path = tmp_path / "rec.ld.json"
     run = Run(observers=[FileObserver(path, run_iri=run_iri)], run_id=run_id)
     run._emit_started()
     run.add_agent(AGENT, "prov:SoftwareAgent", name="controller")
     run.add_activity(ACTIVITY, "prov:Activity", associated_with=AGENT)
-    run.log_sources({"path": "model.ld.json"})
-    run.add_resource("config.json", usage_activity=ACTIVITY)
-    run.add_artefact("result.bin", gen_activity=ACTIVITY, sha256="deadbeef", size_bytes=4)
-    run.log_repositories({"name": "motion-spec", "url": "git@github.com:secorolab/motion-spec.git", "commit": "0123abcd"})
-    run.log_dependencies({"name": "rdflib", "version": "7.7.0"})
+    run.add_resource("model.ld.json")
+    run.add_resource("config.json", used_by=ACTIVITY)
+    run.add_artefact("result.bin", generated_by=ACTIVITY, sha256="deadbeef", size_bytes=4)
+    run.add_software("controller", commit="0123abcd", repository="git@example.org:lab/controller.git")
+    run.add_software("rdflib", version="7.7.0")
     run.log_scalar("frames", 1, step=0)
     run._emit_completed()
     return path, Graph().parse(path, format="json-ld")
@@ -49,7 +49,7 @@ def test_file_observer_writes_generic_provenance(tmp_path):
     assert graph.value(run_node, OSLC_AUTO.verdict) == OSLC_AUTO.passed
     # Written relative to the document, so parsing the file resolves it beside the file.
     assert URIRef(path.resolve().as_uri()) in set(graph.objects(run_node, PROV.atLocation))
-    assert '"rec.jsonld"' in path.read_text()
+    assert '"rec.ld.json"' in path.read_text()
     assert (None, PROV.qualifiedUsage, None) in graph
     assert (None, PROV.qualifiedGeneration, None) in graph
     assert not any("observation#" in str(term) or "/bdd#" in str(term) for triple in graph for term in triple)
@@ -72,7 +72,7 @@ def test_prov_relations_replace_the_rec_collections(tmp_path):
 
 def test_recording_a_file_hands_back_the_entity_it_minted(tmp_path):
     """The caller needs the entity IRI to relate the file to activities of its own."""
-    run = Run(observers=[FileObserver(tmp_path / "rec.jsonld")], run_id="run-1")
+    run = Run(observers=[FileObserver(tmp_path / "rec.ld.json")], run_id="run-1")
     run._emit_started()
     assert run.add_resource("config.json") == REC_RUN["run-1/entity/config.json"]
     assert run.add_artefact("result.bin") == REC_RUN["run-1/entity/result.bin"]
@@ -92,14 +92,14 @@ def test_files_carry_a_checksum_and_size_in_dcat_form(tmp_path):
 def test_software_the_run_used_is_an_agent_it_is_associated_with(tmp_path):
     _path, graph = recorded_graph(tmp_path)
     run_node = REC_RUN["run-1"]
-    repository = REC_RUN["run-1/repository/motion-spec"]
-    dependency = REC_RUN["run-1/dependency/rdflib"]
+    repository = REC_RUN["run-1/software/controller"]
+    dependency = REC_RUN["run-1/software/rdflib"]
     for agent in (repository, dependency):
         assert (run_node, PROV.wasAssociatedWith, agent) in graph
         assert (agent, RDF.type, PROV.SoftwareAgent) in graph
-    assert str(graph.value(repository, SDO.name)) == "motion-spec"
+    assert str(graph.value(repository, SDO.name)) == "controller"
     assert str(graph.value(repository, SDO.identifier)) == "0123abcd"
-    assert graph.value(repository, SDO.codeRepository) == URIRef("https://github.com/secorolab/motion-spec.git")
+    assert graph.value(repository, SDO.codeRepository) == URIRef("https://example.org/lab/controller.git")
     assert str(graph.value(dependency, SDO.softwareVersion)) == "7.7.0"
 
 
@@ -118,7 +118,7 @@ def _minted(graph):
 
 def test_injected_run_iri_is_the_run_node(tmp_path):
     """A caller that already minted the run elsewhere gets that IRI, and reopening keeps it."""
-    external = "https://secorolab.github.io/motion-spec/provenance/run/run-1"
+    external = "https://example.org/provenance/run/run-1"
     path, graph = recorded_graph(tmp_path, run_iri=external)
     assert graph.value(URIRef(external), OSLC_AUTO.state) == OSLC_AUTO.complete
     assert (REC_RUN["run-1"], OSLC_AUTO.state, None) not in graph

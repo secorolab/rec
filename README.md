@@ -3,8 +3,9 @@
 [![Tests (Python 3.12 and 3.14)](https://github.com/secorolab/rec/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/secorolab/rec/actions/workflows/tests.yml)
 [![Documentation](https://github.com/secorolab/rec/actions/workflows/docs.yml/badge.svg?branch=main)](https://secoro.uni-bremen.de/rec/)
 
-REC records robot runs as JSON-LD provenance graphs. A run can be stored in a
-file, MariaDB, or both.
+REC records robot runs as JSON-LD provenance graphs on the
+[prov-extension and rec vocabularies](https://secorolab.github.io/metamodels/).
+A run can be stored in a file, MariaDB, or both.
 
 ## Install
 
@@ -20,21 +21,23 @@ pip install -e ".[mariadb]"
 
 ## Record a run
 
-`Run` owns the canonical run ID. `FileObserver` creates its own stable file ID.
+`Run` owns the run ID; the run's IRI ends in it, and reopening an archive
+continues that run.
 
 ```python
+from rec import Run
 from rec.observers import FileObserver
-from rec.run import Run
 
 
 class CalibrationRun(Run):
     def main(self):
-        # Run the robot task here.
+        self.add_agent("https://example.org/agent/calibrator", "prov:SoftwareAgent", name="calibrator")
+        self.add_resource("config/robot.yaml")
         return "ok"
 
 
 run = CalibrationRun(
-    observers=[FileObserver("runs/calibration/rec.jsonld")],
+    observers=[FileObserver("runs/calibration/rec.ld.json")],
     run_id="calibration",
 )
 run.run()
@@ -42,7 +45,8 @@ run.run()
 
 The run is a `prov-ext:Execution`. Its lifecycle is an OSLC Automation
 `oslc_auto:state` (`queued`, `inProgress`, `complete`, `canceled`) and, once
-complete, an `oslc_auto:verdict` (`passed`, `failed`, `error`).
+complete, an `oslc_auto:verdict` (`passed`, `failed`, `error`). The metamodel
+asks every execution to name the agent that ran it and what it used, as above.
 
 ## MariaDB
 
@@ -55,8 +59,8 @@ MARIADB_HOST=localhost
 MARIADB_PORT=3306
 ```
 
-Use both observers to write a file archive and MariaDB at the same time. The
-database retains the file observer's ID, so both records refer to the same run.
+Use both observers to write a file archive and MariaDB at the same time; both
+records describe the same run node.
 
 ```python
 from rec.observers import FileObserver, MariaDBObserver
@@ -64,7 +68,7 @@ from rec.run import Run
 
 run = Run(
     observers=[
-        FileObserver("runs/run-1/rec.jsonld"),
+        FileObserver("runs/run-1/rec.ld.json"),
         MariaDBObserver(),
     ],
     run_id="run-1",
@@ -75,12 +79,12 @@ Import archived file-only runs later:
 
 ```python
 database = MariaDBObserver()
-database.sync_file("runs/run-1/rec.jsonld")
+database.sync_file("runs/run-1/rec.ld.json")
 database.sync_files("runs")
 ```
 
-`sync_files()` orders and filters imports by `prov:startedAtTime`; it does not
-replace the file observer's ID.
+`sync_files()` imports every `*.ld.json` below the directory in
+`prov:startedAtTime` order, keeping each archive's run IRI.
 
 ## Tests
 
@@ -88,8 +92,9 @@ replace the file observer's ID.
 pytest
 ```
 
-MariaDB integration tests require a disposable database selected by
-`REC_TEST_MARIADB_DATABASE`:
+The conformance test needs a metamodels checkout beside this repository or
+at `REC_METAMODELS_DIR`. MariaDB integration tests require the optional driver
+and a disposable database selected by `REC_TEST_MARIADB_DATABASE`:
 
 ```shell
 REC_TEST_MARIADB_DATABASE=rec_test pytest tests/test_mariadb_observer.py

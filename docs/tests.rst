@@ -1,19 +1,21 @@
 Tests
 =====
 
-Run the file-backed suite:
+Run the suite:
 
 .. code-block:: shell
 
-   pip install pytest
+   pip install -e ".[dev]"
    pytest
 
-MariaDB integration tests additionally need the optional driver, a running
-MariaDB server, and a disposable database:
+The conformance test reads the shapes from a metamodels checkout, found beside
+this repository or at ``REC_METAMODELS_DIR``. MariaDB
+integration tests additionally need the optional driver, a running MariaDB
+server, and a disposable database; without the driver they are skipped:
 
 .. code-block:: shell
 
-   pip install -e ".[mariadb]" pytest
+   pip install -e ".[mariadb,dev]"
    export REC_TEST_MARIADB_DATABASE=rec_test
    pytest tests/test_mariadb_observer.py
 
@@ -26,30 +28,30 @@ Coverage
    * - Area
      - Covered guarantee
      - Test module
+   * - Run lifecycle
+     - Queue, cancel, complete, fail and interrupt map to the OSLC
+       (state, verdict) pair; heartbeats, metrics, host, trigger and starter
+       are recorded.
+     - ``tests/test_run_lifecycle.py``
    * - File observer
-     - Writes REC/PROV JSON-LD, records lifecycle as an RDF type, and
-       preserves ``rec:file-id`` when reopening the archive.
+     - Writes PROV/rec JSON-LD that conforms to the metamodel shapes, mints
+       run-scoped instance IRIs, keeps an injected run IRI on reopening, and
+       hands back the file entities it mints.
      - ``tests/test_file_observer.py``
    * - MariaDB observer
-     - Stores a completed database-only run without inventing a file identity.
-     - ``tests/test_mariadb_observer.py``
-   * - Dual backend
-     - File and MariaDB observers retain the same file ID and archive path.
-     - ``tests/test_mariadb_observer.py``
-   * - Archive synchronisation
-     - Preserves run and file identities; imports in ``prov:startedAtTime``
-       order and filters with a start-time cursor.
+     - Stores database-only and dual-backend runs under one run node with
+       the archive location, numbers runs, and imports archives in
+       ``prov:startedAtTime`` order with a cursor.
      - ``tests/test_mariadb_observer.py``
 
 Not covered
 -----------
 
 The suite does not currently cover MariaDB connection failures or retries,
-concurrent writers, SHACL validation, or recovery from partial or corrupt
-archives.
+concurrent writers, or recovery from partial or corrupt archives.
 
 Continuous integration
 ----------------------
 
 GitHub Actions runs the full suite against MariaDB 11 on Python 3.12 and
-Python 3.14.
+Python 3.14, with the metamodels checked out at ``REC_METAMODELS_DIR``.

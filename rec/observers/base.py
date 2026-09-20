@@ -30,13 +30,7 @@ class BaseObserver:
     def close(self):
         raise NotImplementedError
 
-    def log_sources(self, sources):
-        pass
-
-    def log_repositories(self, repositories):
-        pass
-
-    def log_dependencies(self, dependencies):
+    def set_file_source(self, archive_path):
         pass
 
     def log_host_info(self, host_info):
@@ -46,6 +40,9 @@ class BaseObserver:
         pass
 
     def add_activity(self, activity_id, activity_type, associated_with=None):
+        pass
+
+    def add_software(self, name, version=None, commit=None, repository=None):
         pass
 
     def add_resource(self, path, used_by, used_at, label=None, sha256=None, size_bytes=None, archive_path=None):

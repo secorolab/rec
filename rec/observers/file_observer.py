@@ -6,7 +6,7 @@
 
 from pathlib import Path
 
-from rec.observers.graph_observer import GraphObserver, run_id_of, run_node
+from rec.observers.graph_observer import GraphObserver, local_name, run_node, serialize
 
 
 class FileObserver(GraphObserver):
@@ -25,7 +25,7 @@ class FileObserver(GraphObserver):
             run = run_node(self.graph)
             if run is None:
                 raise ValueError("existing file describes no run")
-            self.run_id = run_id_of(run)
+            self.run_id = local_name(run)
             # Reopening must continue the archive's own run node, never fork a second one.
             self.run_iri = self.run_iri or run
 
@@ -34,5 +34,5 @@ class FileObserver(GraphObserver):
         self._set_location(self.path.name)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        temporary.write_text(self.serialize() + "\n")
+        temporary.write_text(serialize(self.graph) + "\n")
         temporary.replace(self.path)

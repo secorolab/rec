@@ -3,9 +3,10 @@
 
 import platform
 import socket
+import threading
 
 import pytest
-from rdflib import Graph, Namespace, RDF
+from rdflib import Graph, Namespace, RDF, URIRef
 from rdflib.namespace import PROV, RDFS, SDO
 
 from rec.observers import FileObserver
@@ -31,7 +32,7 @@ def lifecycle(graph, run):
 
 
 def test_queued_run_cancels(tmp_path):
-    path = tmp_path / "rec.jsonld"
+    path = tmp_path / "rec.ld.json"
     run = Run(observers=[FileObserver(path)], run_id="run-1")
     run.queue()
     assert run.status is RunStatus.QUEUED
@@ -43,11 +44,11 @@ def test_queued_run_cancels(tmp_path):
     assert lifecycle(graph, activity) == (OSLC_AUTO.canceled, OSLC_AUTO.unavailable)
     assert graph.value(activity, PROV.startedAtTime) is None
     assert graph.value(activity, REC["queued-time"]) is not None
-    assert run.info()["end_time"] is not None
+    assert run.end_time is not None
 
 
 def test_failed_run_records_its_stacktrace(tmp_path):
-    path = tmp_path / "rec.jsonld"
+    path = tmp_path / "rec.ld.json"
     run = FailingRun(observers=[FileObserver(path)], run_id="run-6")
     run.beat_interval = 0
     run.run()
@@ -62,7 +63,7 @@ def test_failed_run_records_its_stacktrace(tmp_path):
 
 
 def test_running_run_interrupts_not_cancels(tmp_path):
-    path = tmp_path / "rec.jsonld"
+    path = tmp_path / "rec.ld.json"
     run = InterruptedRun(observers=[FileObserver(path)], run_id="run-2")
     run.beat_interval = 0
     run.run()
@@ -78,7 +79,7 @@ def test_running_run_interrupts_not_cancels(tmp_path):
 
 
 def test_a_heartbeat_keeps_only_its_latest_time(tmp_path):
-    path = tmp_path / "rec.jsonld"
+    path = tmp_path / "rec.ld.json"
     observer = FileObserver(path)
     run = Run(observers=[observer], run_id="run-9")
     run._emit_started()
@@ -94,7 +95,7 @@ def test_a_heartbeat_keeps_only_its_latest_time(tmp_path):
 
 
 def test_stepless_scalars_do_not_overwrite(tmp_path):
-    path = tmp_path / "rec.jsonld"
+    path = tmp_path / "rec.ld.json"
     run = Run(observers=[FileObserver(path)], run_id="run-4")
     run._emit_started()
     run.log_scalar("loss", 0.5)
@@ -120,8 +121,29 @@ def points(graph, metric_name):
     }
 
 
+def test_the_heartbeat_does_not_race_the_run(tmp_path, monkeypatch):
+    """The heartbeat thread writes the same graph and file the run is filling."""
+    thread_errors = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args.exc_value))
+
+    class BusyRun(Run):
+        def main(self):
+            for step in range(20):
+                self.log_scalar("x", step, step=step)
+            return "ok"
+
+    path = tmp_path / "rec.ld.json"
+    run = BusyRun(observers=[FileObserver(path)], run_id="run-10")
+    run.beat_interval = 0.01
+    run.run()
+
+    assert thread_errors == []
+    assert run.status is RunStatus.COMPLETED
+    assert len(points(Graph().parse(path, format="json-ld"), "x")) == 20
+
+
 def test_host_info_is_collected_at_start(tmp_path):
-    path = tmp_path / "rec.jsonld"
+    path = tmp_path / "rec.ld.json"
     run = Run(observers=[FileObserver(path)], run_id="run-5")
     run._emit_started()
 
@@ -137,23 +159,24 @@ def test_host_info_is_collected_at_start(tmp_path):
 
 
 def test_started_run_records_its_trigger_and_starter(tmp_path):
-    path = tmp_path / "rec.jsonld"
+    path = tmp_path / "rec.ld.json"
     run = Run(observers=[FileObserver(path)], run_id="run-7")
-    run._emit_started(trigger="rec:entity/schedule", starter="rec:activity/scheduler")
+    trigger = URIRef("https://example.org/entity/schedule")
+    starter = URIRef("https://example.org/activity/scheduler")
+    run._emit_started(trigger=trigger, starter=starter)
 
     graph = Graph().parse(path, format="json-ld")
     activity = REC_RUN["run-7"]
-    trigger = REC["entity/schedule"]
     assert (activity, PROV.wasStartedBy, trigger) in graph
     start = graph.value(activity, PROV.qualifiedStart)
     assert (start, RDF.type, PROV.Start) in graph
     assert graph.value(start, PROV.entity) == trigger
-    assert graph.value(start, PROV.hadActivity) == REC["activity/scheduler"]
+    assert graph.value(start, PROV.hadActivity) == starter
     assert graph.value(start, PROV.atTime) == graph.value(activity, PROV.startedAtTime)
 
 
 def test_started_run_without_trigger_is_unqualified(tmp_path):
-    path = tmp_path / "rec.jsonld"
+    path = tmp_path / "rec.ld.json"
     run = Run(observers=[FileObserver(path)], run_id="run-8")
     run._emit_started()
 
@@ -162,7 +185,7 @@ def test_started_run_without_trigger_is_unqualified(tmp_path):
 
 
 def test_cancelled_run_cannot_start(tmp_path):
-    run = Run(observers=[FileObserver(tmp_path / "rec.jsonld")], run_id="run-3")
+    run = Run(observers=[FileObserver(tmp_path / "rec.ld.json")], run_id="run-3")
     run.queue()
     run.cancel()
     with pytest.raises(RuntimeError):
