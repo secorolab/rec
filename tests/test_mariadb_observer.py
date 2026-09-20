@@ -56,8 +56,15 @@ def test_a_queued_run_is_cancelled_by_id(observer):
 
 def test_a_table_from_before_run_ids_is_migrated(observer):
     table = f"{observer.table}_old"
+    # The table as the previous release created it
     observer.cursor.execute(
-        f"CREATE TABLE {table} (id INT AUTO_INCREMENT PRIMARY KEY, status VARCHAR(20) NOT NULL, run_info JSON)"
+        f"""
+        CREATE TABLE {table} (
+            id INT AUTO_INCREMENT PRIMARY KEY, status VARCHAR(20) NOT NULL, scenario_id VARCHAR(20),
+            host_info JSON, sources JSON, repositories JSON, dependencies JSON, metrics JSON,
+            agents JSON, resources JSON, artefacts JSON, run_info JSON, data JSON
+        )
+        """
     )
     observer.cursor.execute(f"INSERT INTO {table} (status) VALUES ('COMPLETED'), ('RUNNING')")
     try:
