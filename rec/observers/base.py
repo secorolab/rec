@@ -1,7 +1,7 @@
 import threading
 from datetime import datetime
 
-from rec import jsonld
+from rec import State, Verdict, jsonld
 
 RUN_BASE = "https://secoro.uni-bremen.de/rec/run/"
 
@@ -11,6 +11,7 @@ class BaseObserver:
 
     A backend implements ``get_run``, ``update_run_data``, ``query_active_run`` and ``close``;
     the run's columns are the same in every store, and ``document`` is their JSON-LD form.
+    Whoever owns the observer closes it, once every run it records is over.
     """
 
     base = RUN_BASE
@@ -39,31 +40,27 @@ class BaseObserver:
         return jsonld.document(self.run_iri(run_id), self.get_run(run_id))
 
     def log_queued_run(self, run_id: str, queued_time: datetime):
-        self.update_run_data(run_id, "status", "QUEUED")
-        self._run_info(run_id, queued_time=queued_time.isoformat())
+        self._lifecycle(run_id, State.QUEUED, Verdict.UNAVAILABLE, queued_time=queued_time.isoformat())
 
     def log_started_run(self, run_id: str, started_time: datetime, trigger=None, starter=None):
-        self.update_run_data(run_id, "status", "RUNNING")
-        self._run_info(run_id, start_time=started_time.isoformat(), trigger=trigger, starter=starter)
+        self._lifecycle(
+            run_id, State.IN_PROGRESS, Verdict.UNAVAILABLE, start_time=started_time.isoformat(), trigger=trigger, starter=starter
+        )
 
     def log_run_heartbeat(self, run_id: str, beat_time: datetime, result):
         self._run_info(run_id, heartbeat_time=beat_time.isoformat(), result=result)
 
-    def log_completed_run(self, run_id: str, completed_time: datetime):
-        self.update_run_data(run_id, "status", "COMPLETED")
-        self._run_info(run_id, end_time=completed_time.isoformat())
+    def log_completed_run(self, run_id: str, completed_time: datetime, result=None):
+        self._lifecycle(run_id, State.COMPLETE, Verdict.PASSED, end_time=completed_time.isoformat(), result=result)
 
     def log_interrupted_run(self, run_id: str, interrupted_time: datetime, fail_trace: str | None = None):
-        self.update_run_data(run_id, "status", "INTERRUPTED")
-        self._run_info(run_id, end_time=interrupted_time.isoformat(), fail_trace=fail_trace)
+        self._lifecycle(run_id, State.COMPLETE, Verdict.ERROR, end_time=interrupted_time.isoformat(), fail_trace=fail_trace)
 
     def log_failed_run(self, run_id: str, failed_time: datetime, fail_trace: str | None = None):
-        self.update_run_data(run_id, "status", "FAILED")
-        self._run_info(run_id, end_time=failed_time.isoformat(), fail_trace=fail_trace)
+        self._lifecycle(run_id, State.COMPLETE, Verdict.FAILED, end_time=failed_time.isoformat(), fail_trace=fail_trace)
 
     def log_cancelled_run(self, run_id: str, cancelled_time: datetime):
-        self.update_run_data(run_id, "status", "CANCELLED")
-        self._run_info(run_id, end_time=cancelled_time.isoformat())
+        self._lifecycle(run_id, State.CANCELED, Verdict.UNAVAILABLE, end_time=cancelled_time.isoformat())
 
     def log_host_info(self, run_id: str, host_info: dict):
         self.update_run_data(run_id, "host_info", host_info)
@@ -85,7 +82,9 @@ class BaseObserver:
             row = {"name": metric_name, "value": value, "step": step}
             if time is not None:
                 row["time"] = time.isoformat()
-            self.update_run_data(run_id, "metrics", metrics + [row])
+            # One value per step: logging a step again is a re-measurement, not a second one.
+            kept = [m for m in metrics if (m["name"], m["step"]) != (metric_name, step)]
+            self.update_run_data(run_id, "metrics", kept + [row])
 
     def add_agent(self, run_id: str, agent_id: str, agent_type: str, name: str | None = None):
         row = {"id": agent_id, "type": agent_type}
@@ -98,6 +97,13 @@ class BaseObserver:
 
     def add_artefact(self, run_id: str, filename, gen_activity=None, generated_time=None, title=None, sha256=None, size_bytes=None):
         self._append(run_id, "artefacts", _file_row(filename, gen_activity, generated_time, title, sha256, size_bytes))
+
+    def _lifecycle(self, run_id, state, verdict, **fields):
+        with self._lock:
+            # State before verdict: a verdict is only valid once the run is complete.
+            self.update_run_data(run_id, "state", state)
+            self.update_run_data(run_id, "verdict", verdict)
+            self._run_info(run_id, **fields)
 
     def _run_info(self, run_id, **fields):
         with self._lock:

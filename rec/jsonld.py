@@ -3,6 +3,8 @@
 import re
 from pathlib import Path
 
+from rec import State, Verdict
+
 METAMODELS = "https://secorolab.github.io/metamodels/"
 CONTEXT = [
     METAMODELS + "prov.json",
@@ -13,27 +15,12 @@ CONTEXT = [
 DIMENSIONLESS = "http://qudt.org/vocab/quantitykind/Dimensionless"
 UNITLESS = "http://qudt.org/vocab/unit/UNITLESS"
 
-# OSLC Automation: where a run is, and once complete, how it turned out. DEAD is derived from
-# a stale heartbeat by whoever reads, never recorded.
-LIFECYCLE = {
-    "QUEUED": ("queued", "unavailable"),
-    "RUNNING": ("in-progress", "unavailable"),
-    "COMPLETED": ("complete", "passed"),
-    "FAILED": ("complete", "failed"),
-    "INTERRUPTED": ("complete", "error"),
-    "TIMED_OUT": ("complete", "error"),
-    "CANCELLED": ("canceled", "unavailable"),
-}
-TIMED_OUT_TRACE = "timed out"
-
-
 def document(run_iri, record):
     """The JSON-LD document of one run, from the columns an observer stored for it."""
-    status = record.get("status")
-    if status not in LIFECYCLE:
-        raise ValueError(f"{status} is not a recordable status")
+    state, verdict = State(record["state"]), Verdict(record["verdict"])
+    if verdict is not Verdict.UNAVAILABLE and state is not State.COMPLETE:
+        raise ValueError(f"a {state} run has no verdict yet, not {verdict}")
     info = record.get("run_info") or {}
-    state, verdict = LIFECYCLE[status]
     run = {"@id": run_iri, "@type": ["Activity", "Execution"], "state": state, "verdict": verdict}
     _set(run, "queued-time", info.get("queued_time"))
     _set(run, "startedAtTime", info.get("start_time"))
@@ -41,8 +28,6 @@ def document(run_iri, record):
     _set(run, "heartbeat-time", info.get("heartbeat_time"))
     _set(run, "result", info.get("result"))
     _set(run, "fail-trace", info.get("fail_trace"))
-    if status == "TIMED_OUT":
-        run["fail-trace"] = info.get("fail_trace") or TIMED_OUT_TRACE
     nodes = [run]
     if info.get("trigger"):
         run["prov:wasStartedBy"] = {"@id": info["trigger"]}
@@ -69,14 +54,14 @@ def document(run_iri, record):
         associated.append(node["@id"])
         nodes.append(node)
     for row in record.get("repositories") or []:
-        node = {"@id": f"{run_iri}/software/{_slug(row['name'])}", "@type": ["Agent", "SoftwareAgent"]}
+        node = {"@id": f"{run_iri}/repository/{_slug(row['name'])}", "@type": ["Agent", "SoftwareAgent"]}
         node["name"] = row["name"]
         _set(node, "identifier", row.get("commit"))
         _set(node, "codeRepository", _url(row.get("url")))
         associated.append(node["@id"])
         nodes.append(node)
     for row in record.get("dependencies") or []:
-        node = {"@id": f"{run_iri}/software/{_slug(row['name'])}", "@type": ["Agent", "SoftwareAgent"]}
+        node = {"@id": f"{run_iri}/dependency/{_slug(row['name'])}", "@type": ["Agent", "SoftwareAgent"]}
         node["name"] = row["name"]
         _set(node, "softwareVersion", row.get("version"))
         associated.append(node["@id"])
@@ -151,11 +136,11 @@ def record(doc):
     if "prov:wasStartedBy" in run:
         info["trigger"] = run["prov:wasStartedBy"]["@id"]
         info["starter"] = nodes[run["prov:qualifiedStart"]["@id"]].get("hadActivity")
-    pair = (run["state"], run["verdict"])
-    status = next(name for name, value in LIFECYCLE.items() if value == pair)
-    if pair == LIFECYCLE["TIMED_OUT"] and info["fail_trace"] == TIMED_OUT_TRACE:
-        status = "TIMED_OUT"
-    rec = {"status": status, "run_info": {key: value for key, value in info.items() if value is not None}}
+    rec = {
+        "state": State(run["state"]),
+        "verdict": Verdict(run["verdict"]),
+        "run_info": {key: value for key, value in info.items() if value is not None},
+    }
 
     host = nodes.get(f"{run_iri}/host")
     if host:
@@ -164,13 +149,12 @@ def record(doc):
         )
     for agent_id in run.get("wasAssociatedWith") or []:
         node = nodes[agent_id]
-        if agent_id.startswith(f"{run_iri}/software/"):
-            if "softwareVersion" in node:
-                rec.setdefault("dependencies", []).append(_drop_none({"name": node["name"], "version": node["softwareVersion"]}))
-            else:
-                rec.setdefault("repositories", []).append(
-                    _drop_none({"name": node["name"], "commit": node.get("identifier"), "url": node.get("codeRepository")})
-                )
+        if agent_id.startswith(f"{run_iri}/dependency/"):
+            rec.setdefault("dependencies", []).append(_drop_none({"name": node["name"], "version": node.get("softwareVersion")}))
+        elif agent_id.startswith(f"{run_iri}/repository/"):
+            rec.setdefault("repositories", []).append(
+                _drop_none({"name": node["name"], "commit": node.get("identifier"), "url": node.get("codeRepository")})
+            )
         else:
             kind = next(kind for kind in node["@type"] if kind != "Agent")
             rec.setdefault("agents", []).append(_drop_none({"id": agent_id, "type": kind, "name": node.get("name")}))

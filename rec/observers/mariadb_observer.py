@@ -8,6 +8,7 @@ import mariadb
 
 from dotenv import load_dotenv
 
+from rec import State, Verdict
 from rec.observers.base import BaseObserver
 
 JSON_COLUMNS = (
@@ -69,7 +70,8 @@ class MariaDBObserver(BaseObserver):
                 CREATE TABLE IF NOT EXISTS {self.table} (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     run_id VARCHAR(255) NOT NULL UNIQUE,
-                    status VARCHAR(20) NOT NULL,
+                    state VARCHAR(20) NOT NULL,
+                    verdict VARCHAR(20) NOT NULL,
                     scenario_id VARCHAR(20),
                     host_info JSON,
                     sources JSON,
@@ -85,20 +87,53 @@ class MariaDBObserver(BaseObserver):
             """
             )
             print(f"Table '{self.table}' created or already exists.")
+            self._migrate()
         except mariadb.Error as e:
             print(f"Error creating table: {e}")
             self.conn.rollback()  # Rollback in case of DDL error
 
-    def add_run(self, run_id: str, status: str) -> int:
+    def _migrate(self):
+        """A table from before run ids and OSLC lifecycles gets the columns, its `status` kept as it was"""
+        self.cursor.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_schema = ? AND table_name = ?",
+            (self.db_name, self.table),
+        )
+        columns = {row[0] for row in self.cursor}
+        if "run_id" in columns:
+            return
+        self.cursor.execute(
+            f"ALTER TABLE {self.table} ADD COLUMN run_id VARCHAR(255), ADD COLUMN state VARCHAR(20), "
+            "ADD COLUMN verdict VARCHAR(20), MODIFY status VARCHAR(20) NULL"
+        )
+        self.cursor.execute(
+            f"""
+            UPDATE {self.table} SET run_id = id,
+                state = CASE status
+                    WHEN 'QUEUED' THEN '{State.QUEUED}' WHEN 'RUNNING' THEN '{State.IN_PROGRESS}'
+                    WHEN 'CANCELLED' THEN '{State.CANCELED}' ELSE '{State.COMPLETE}' END,
+                verdict = CASE status
+                    WHEN 'COMPLETED' THEN '{Verdict.PASSED}' WHEN 'FAILED' THEN '{Verdict.FAILED}'
+                    WHEN 'INTERRUPTED' THEN '{Verdict.ERROR}' WHEN 'TIMED_OUT' THEN '{Verdict.ERROR}'
+                    ELSE '{Verdict.UNAVAILABLE}' END
+            """
+        )
+        self.cursor.execute(
+            f"ALTER TABLE {self.table} MODIFY run_id VARCHAR(255) NOT NULL, ADD UNIQUE (run_id), "
+            "MODIFY state VARCHAR(20) NOT NULL, MODIFY verdict VARCHAR(20) NOT NULL"
+        )
+        print(f"Table '{self.table}' migrated: run_id, state and verdict added.")
+
+    def add_run(self, run_id: str, state: State, verdict: Verdict) -> int:
         """
         Saves a new run to the MariaDB database
         :param run_id: The run's identity
-        :param status: The status of the run being added (RUNNING or QUEUED)
+        :param state: Where the run is
+        :param verdict: How it turned out, ``unavailable`` until complete
         :return: The short number the database assigned
         """
-        template = f"INSERT INTO {self.table} (run_id, status) VALUES (?, ?);"
+        template = f"INSERT INTO {self.table} (run_id, state, verdict) VALUES (?, ?, ?);"
         try:
-            self.cursor.execute(template, (run_id, status))
+            self.cursor.execute(template, (run_id, str(state), str(verdict)))
         except mariadb.Error as e:
             print(f"Error: {e}")
 
@@ -115,12 +150,12 @@ class MariaDBObserver(BaseObserver):
         if column in JSON_COLUMNS:
             d = json.dumps(data)
         else:
-            d = data
+            d = str(data)
 
         try:
             with self._lock:
                 if self.db_id(run_id) is None:
-                    self.add_run(run_id, data if column == "status" else "QUEUED")
+                    self.add_run(run_id, State.QUEUED, Verdict.UNAVAILABLE)
                 self.cursor.execute(
                     f"UPDATE {self.table} SET {column} = ? WHERE run_id = ?",
                     (d, run_id),
@@ -142,7 +177,7 @@ class MariaDBObserver(BaseObserver):
         :param run_id:
         :return:
         """
-        cols = ["id", "status", "scenario_id", *JSON_COLUMNS]
+        cols = ["id", "state", "verdict", "scenario_id", *JSON_COLUMNS]
         try:
             self.cursor.execute(
                 "SELECT {} FROM {} WHERE run_id=?;".format(", ".join(cols), self.table),
@@ -154,8 +189,8 @@ class MariaDBObserver(BaseObserver):
 
         d = {}
         for row in self.cursor:
-            d = dict(id=row[0], status=row[1], scenario_id=row[2])
-            for k, v in zip(cols[3:], row[3:]):
+            d = dict(id=row[0], state=State(row[1]), verdict=Verdict(row[2]), scenario_id=row[3])
+            for k, v in zip(cols[4:], row[4:]):
                 if v is not None:
                     d[k] = json.loads(v)
 
@@ -164,7 +199,7 @@ class MariaDBObserver(BaseObserver):
     def query_active_run(self):
         try:
             self.cursor.execute(
-                f"SELECT run_id, status FROM {self.table} WHERE status ='RUNNING'"
+                f"SELECT run_id FROM {self.table} WHERE state = ?", (str(State.IN_PROGRESS),)
             )
         except mariadb.Error as e:
             print(f"An error occurred: {e}")
@@ -175,7 +210,7 @@ class MariaDBObserver(BaseObserver):
 
     def close(self):
         """
-        This method must be called when the run is over to close the connection to the DB
+        Called by whoever owns the observer once its runs are over; a run never closes it
         :return:
         """
         self.cursor.close()

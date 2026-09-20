@@ -10,8 +10,9 @@ def main():
 
 
 if __name__ == "__main__":
-    run = Run()
+    observer = MariaDBObserver()
+    run = Run(observers=[observer])
     run.main = main
-    run.observers.append(MariaDBObserver())
 
     run.run()
+    observer.close()

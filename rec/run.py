@@ -7,6 +7,7 @@ import traceback
 from typing import Sequence
 from uuid import uuid4
 
+from rec import State, Verdict
 from rec.observers.base import BaseObserver
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,8 @@ class Run:
         self.scenario = scenario
         self.start_time = None
         self.end_time = None
-        self.status = None
+        self.state = None
+        self.verdict = None
         self.result = None
         self.pre_run_hooks = list(pre_run_hooks)
         self.post_run_hooks = list(post_run_hooks)
@@ -99,7 +101,7 @@ class Run:
             observer.log_run_heartbeat(self.id, beat_time, result=self.result)
 
     def _emit_cancelled(self):
-        self.status = RunStatus.CANCELLED
+        self.state, self.verdict = State.CANCELED, Verdict.UNAVAILABLE
         cancelled_time = self._stop_time()
         logger.info("Cancelled run %s", self.id)
 
@@ -108,7 +110,7 @@ class Run:
             observer.log_cancelled_run(self.id, cancelled_time)
 
     def _emit_queued(self):
-        self.status = RunStatus.QUEUED
+        self.state, self.verdict = State.QUEUED, Verdict.UNAVAILABLE
         queued_time = datetime.datetime.now(datetime.UTC)
         logger.info("Queued run %s", self.id)
 
@@ -123,7 +125,7 @@ class Run:
         :param starter: The activity that generated the trigger
         :return:
         """
-        self.status = RunStatus.RUNNING
+        self.state, self.verdict = State.IN_PROGRESS, Verdict.UNAVAILABLE
         self.start_time = datetime.datetime.now(datetime.UTC)
         logger.info("Starting run %s", self.id)
 
@@ -133,16 +135,16 @@ class Run:
         self.log_host_info(host_info())
 
     def _emit_completed(self):
-        self.status = RunStatus.COMPLETED
+        self.state, self.verdict = State.COMPLETE, Verdict.PASSED
         completed_time = self._stop_time()
         logger.info("Completed run %s after %s", self.id, completed_time - self.start_time)
 
         # Update info on observers
         for observer in self.observers:
-            observer.log_completed_run(self.id, completed_time)
+            observer.log_completed_run(self.id, completed_time, self.result)
 
     def _emit_interrupted(self, error=None):
-        self.status = RunStatus.INTERRUPTED
+        self.state, self.verdict = State.COMPLETE, Verdict.ERROR
         interrupted_time = self._stop_time()
         logger.warning("Interrupted run %s after %s", self.id, interrupted_time - self.start_time)
 
@@ -151,7 +153,7 @@ class Run:
             observer.log_interrupted_run(self.id, interrupted_time, _fail_trace(error))
 
     def _emit_failed(self, error=None):
-        self.status = RunStatus.FAILED
+        self.state, self.verdict = State.COMPLETE, Verdict.FAILED
         failed_time = self._stop_time()
         logger.error("Failed run %s after %s", self.id, failed_time - self.start_time, exc_info=error)
 
@@ -168,15 +170,15 @@ class Run:
 
     def queue(self):
         """Record the run as queued, before a runner starts it"""
-        if self.status is not None:
-            raise RuntimeError(f"cannot queue a run with status {self.status}")
+        if self.state is not None:
+            raise RuntimeError(f"cannot queue a run that is {self.state}")
         self._emit_queued()
         return self.id
 
     def cancel(self):
         """Cancel a queued run before it starts"""
-        if self.status is not RunStatus.QUEUED:
-            raise RuntimeError(f"only a queued run can be cancelled, not {self.status}")
+        if self.state is not State.QUEUED:
+            raise RuntimeError(f"only a queued run can be cancelled, not one that is {self.state}")
         self._emit_cancelled()
 
     def run(self, trigger=None, starter=None):
@@ -186,7 +188,7 @@ class Run:
         :param starter: The activity that generated the trigger
         :return:
         """
-        if self.status is RunStatus.CANCELLED:
+        if self.state is State.CANCELED:
             raise RuntimeError("cannot start a cancelled run")
 
         try:
@@ -204,9 +206,6 @@ class Run:
         except Exception as error:
             self._stop_heartbeat()
             self._emit_failed(error)
-        finally:
-            for observer in self.observers:
-                observer.close()
 
         return self.result
 
@@ -331,7 +330,8 @@ class Run:
         """
         return {
             "id": self._id,
-            "status": self.status,
+            "state": self.state,
+            "verdict": self.verdict,
             "start_time": self.start_time.isoformat() if self.start_time else None,
             "end_time": self.end_time.isoformat() if self.end_time else None,
             "result": self.result,
@@ -340,14 +340,3 @@ class Run:
 
 def _fail_trace(error):
     return "".join(traceback.format_exception(error)) if error is not None else None
-
-
-class RunStatus:
-    RUNNING = "RUNNING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    INTERRUPTED = "INTERRUPTED"
-    CANCELLED = "CANCELLED"
-    QUEUED = "QUEUED"
-    TIMED_OUT = "TIMED_OUT"
-    DEAD = "DEAD"

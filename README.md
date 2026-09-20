@@ -24,9 +24,9 @@ The current skeleton of the code allows you to run two examples: The `MariaDBObs
 ### Observers
 
 An Observer is an interface to a type of data storage. One observer holds any number of runs;
-every call names the run it is about. `FileObserver` keeps one JSON-LD document per run in a
-directory, `MariaDBObserver` one row per run in a table. To test the latter you can run the
-following in your terminal:
+every call names the run it is about, and whoever created the observer closes it once its runs
+are over. `FileObserver` keeps one JSON-LD document per run in a directory, `MariaDBObserver`
+one row per run in a table. To test the latter you can run the following in your terminal:
 
 ```shell
 python rec/observers/mariadb_observer.py
@@ -44,7 +44,9 @@ python examples/decentral_run.py
 
 A run is a `prov-ext:Execution` on the
 [rec and prov-extension vocabularies](https://secorolab.github.io/metamodels/). Its lifecycle is
-an OSLC Automation state and verdict, its host a `rec:Host`, sources and resources what it
+an OSLC Automation state and verdict (`rec.State` and `rec.Verdict`: a run is `queued`,
+`in-progress`, `canceled` or `complete`, and once complete `passed`, `failed` or `error`; a
+verdict is `unavailable` before that), its host a `rec:Host`, sources and resources what it
 `prov:used`, artefacts what it generated with checksum and size, repositories and dependencies
 the software agents it ran with, and scalars `rec:Metric` quantities. Every observer stores the
 same columns and `observer.document(run_id)` returns the run as JSON-LD; `FileObserver` writes
