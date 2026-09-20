@@ -30,8 +30,9 @@ Coverage
      - Test module
    * - Run lifecycle
      - Queue, cancel, complete, fail and interrupt map to the OSLC
-       (state, verdict) pair; heartbeats, metrics, host, trigger and starter
-       are recorded.
+       (state, verdict) pair; a running run is cancelled in process and
+       through its archive; the heartbeat does not race the run; metrics,
+       host, trigger and starter are recorded.
      - ``tests/test_run_lifecycle.py``
    * - File observer
      - Writes PROV/rec JSON-LD that conforms to the metamodel shapes, mints

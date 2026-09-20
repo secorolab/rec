@@ -63,6 +63,8 @@ class Run:
         self.end_time = None
         self.status = None
         self.result = None
+        # Set when the run is asked to stop; a cooperative main() polls it and returns.
+        self.cancel_requested = threading.Event()
 
         self.beat_interval = 10
         self._heartbeat = None
@@ -86,6 +88,15 @@ class Run:
         logger.debug("Run %s still running, result so far: %s", self._id, self.result)
         for observer in self.observers:
             observer.log_run_heartbeat(beat_time, self.result)
+        if self.status is RunStatus.RUNNING and any(o.cancel_requested() for o in self.observers):
+            self._emit_canceling()
+
+    def _emit_canceling(self):
+        self.status = RunStatus.CANCELING
+        self.cancel_requested.set()
+        logger.info("Cancelling run %s", self._id)
+        for observer in self.observers:
+            observer.request_cancel()
 
     def _emit_cancelled(self):
         self.status = RunStatus.CANCELLED
@@ -104,13 +115,14 @@ class Run:
     def _emit_started(self, trigger=None, starter=None):
         """Record the run as started, optionally with the PROV entity that triggered it
         and the activity that generated that trigger."""
-        self.status = RunStatus.RUNNING
         self._id = self._id or f"run-{uuid4()}"
         self.start_time = datetime.datetime.now(datetime.UTC)
 
         for observer in self.observers:
             _id = observer.log_started_run(self._id, self.start_time, trigger, starter)
             self._id = _id
+        # Running only once every observer says so: a cancel that arrives earlier is refused.
+        self.status = RunStatus.RUNNING
         logger.info("Starting run %s", self._id)
         self.log_host_info(host_info())
 
@@ -144,15 +156,19 @@ class Run:
         return self._id
 
     def cancel(self):
-        """Cancel a queued run before it starts.
+        """Cancel this run: a queued run ends now, a running one once ``main`` returns.
 
-        A run stopped while already running is interrupted, not cancelled.
+        A run in another process is cancelled through an observer bound to its id:
+        ``FileObserver(path).request_cancel()`` or ``MariaDBObserver(run_id).request_cancel()``.
         """
-        if self.status is not RunStatus.QUEUED:
-            raise RuntimeError(f"only a queued run can be cancelled, not {self.status}")
-        self._emit_cancelled()
-        for observer in self.observers:
-            observer.close()
+        if self.status is RunStatus.QUEUED:
+            self._emit_cancelled()
+            for observer in self.observers:
+                observer.close()
+        elif self.status is RunStatus.RUNNING:
+            self._emit_canceling()
+        else:
+            raise RuntimeError(f"only a queued or running run can be cancelled, not {self.status}")
 
     def main(self):
         """Execute the work represented by this run.
@@ -170,16 +186,22 @@ class Run:
         """
         if self.status is RunStatus.CANCELLED:
             raise RuntimeError("cannot start a cancelled run")
+        if any(observer.cancel_requested() for observer in self.observers):
+            self.cancel_requested.set()
+            self._emit_cancelled()
+            for observer in self.observers:
+                observer.close()
+            return None
 
         try:
             self._emit_started(trigger, starter)
             self._start_heartbeat()
             self.result = self.main()
-            self._emit_completed()
             self._stop_heartbeat()
+            self._emit_cancelled() if self.cancel_requested.is_set() else self._emit_completed()
         except KeyboardInterrupt as interrupt:
             self._stop_heartbeat()
-            self._emit_interrupted(interrupt)
+            self._emit_cancelled() if self.cancel_requested.is_set() else self._emit_interrupted(interrupt)
         except Exception as error:
             self._stop_heartbeat()
             self._emit_failed(error)
@@ -262,4 +284,5 @@ class RunStatus:
     COMPLETED = graph_observer.COMPLETED
     FAILED = graph_observer.FAILED
     INTERRUPTED = graph_observer.INTERRUPTED
+    CANCELING = graph_observer.CANCELING
     CANCELLED = graph_observer.CANCELLED

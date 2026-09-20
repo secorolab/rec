@@ -12,7 +12,7 @@ from uuid import uuid4
 
 import mariadb
 from dotenv import load_dotenv
-from rdflib import Graph
+from rdflib import Graph, URIRef
 from rdflib.namespace import PROV
 
 from rec.observers.graph_observer import OSLC_AUTO, GraphObserver, local_name, locked, run_node, serialize
@@ -74,7 +74,7 @@ class MariaDBObserver(GraphObserver):
         if row:
             self.graph.parse(io.StringIO(row[0]), format="json-ld")
 
-    def _persist(self):
+    def _write(self):
         if self.archive_path is not None:
             self._set_location(self.archive_path)
         self._upsert(self.run_id, self.graph)
@@ -82,6 +82,11 @@ class MariaDBObserver(GraphObserver):
             started_at = self.graph.value(self.run, PROV.startedAtTime)
             if started_at is not None:
                 self._upsert_file_source(self.run_id, self.archive_path, started_at.toPython())
+
+    def _stored_state(self):
+        self.cursor.execute(f"SELECT status FROM {self.table} WHERE run_id = ?", (self.run_id,))
+        row = self.cursor.fetchone()
+        return URIRef(row[0]) if row else None
 
     def set_file_source(self, archive_path):
         """Associate this live database run with its file-backed source."""

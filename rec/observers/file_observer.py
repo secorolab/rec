@@ -4,9 +4,10 @@
 
 """File-backed REC graph observer."""
 
+import json
 from pathlib import Path
 
-from rec.observers.graph_observer import GraphObserver, local_name, run_node, serialize
+from rec.observers.graph_observer import OSLC_AUTO, GraphObserver, local_name, run_node, serialize
 
 
 class FileObserver(GraphObserver):
@@ -29,10 +30,22 @@ class FileObserver(GraphObserver):
             # Reopening must continue the archive's own run node, never fork a second one.
             self.run_iri = self.run_iri or run
 
-    def _persist(self):
+    def _write(self):
         # The archive is the directory this file sits in, so its own name is the portable path.
         self._set_location(self.path.name)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
         temporary.write_text(serialize(self.graph) + "\n")
         temporary.replace(self.path)
+
+    def _stored_state(self):
+        # A plain JSON scan of our own compaction: parsing with rdflib fetches the context.
+        try:
+            document = json.loads(self.path.read_text())
+        except (OSError, ValueError):
+            return None
+        for node in document.get("@graph", [document]):
+            state = node.get("oslc_auto:state")
+            if isinstance(state, dict):
+                return OSLC_AUTO[state["@id"].removeprefix("oslc_auto:")]
+        return None

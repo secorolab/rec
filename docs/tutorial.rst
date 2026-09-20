@@ -56,6 +56,30 @@ what it used (``add_resource``); a run that records neither still writes its
 archive but does not validate. Agents, activities and trigger entities are full IRIs of the
 caller's own; ``prov:`` is the one shorthand, for PROV types.
 
+Cancel a run
+------------
+
+A queued run is cancelled with ``run.cancel()`` and ends at once. A running run
+is asked to stop the same way, or from anywhere that can reach its store, by an
+observer bound to its id:
+
+.. code-block:: python
+
+   FileObserver("runs/calibration/rec.ld.json").request_cancel()
+   MariaDBObserver(run_id="calibration").request_cancel()
+
+The store then says ``canceling``. The run adopts the request on its next write
+or heartbeat, sets ``run.cancel_requested``, and records ``canceled`` once
+``main()`` returns. Stopping is cooperative: a ``main()`` that should stop early
+polls that event.
+
+.. code-block:: python
+
+   class CalibrationRun(Run):
+       def main(self):
+           while not self.cancel_requested.is_set():
+               step()
+
 Record the next run to a file and MariaDB
 -----------------------------------------
 

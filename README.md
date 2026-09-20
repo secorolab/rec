@@ -48,6 +48,11 @@ The run is a `prov-ext:Execution`. Its lifecycle is an OSLC Automation
 complete, an `oslc_auto:verdict` (`passed`, `failed`, `error`). The metamodel
 asks every execution to name the agent that ran it and what it used, as above.
 
+A running run is cancelled from anywhere that reaches its store, by run id:
+`FileObserver(path).request_cancel()` or `MariaDBObserver(run_id).request_cancel()`.
+The run adopts the request at its next write or heartbeat, sets
+`run.cancel_requested` for a cooperative `main()`, and records `canceled`.
+
 ## MariaDB
 
 Set the database connection in `.env`:

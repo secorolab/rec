@@ -53,7 +53,9 @@ IN_PROGRESS = (OSLC_AUTO.inProgress, OSLC_AUTO.unavailable)
 COMPLETED = (OSLC_AUTO.complete, OSLC_AUTO.passed)
 FAILED = (OSLC_AUTO.complete, OSLC_AUTO.failed)
 INTERRUPTED = (OSLC_AUTO.complete, OSLC_AUTO.error)
+CANCELING = (OSLC_AUTO.canceling, OSLC_AUTO.unavailable)
 CANCELLED = (OSLC_AUTO.canceled, OSLC_AUTO.unavailable)
+LIVE = (OSLC_AUTO.queued, OSLC_AUTO.inProgress)
 
 
 def locked(method):
@@ -120,6 +122,21 @@ class GraphObserver(BaseObserver):
     def log_cancelled_run(self, cancelled_time: datetime):
         """Record cancellation at ``cancelled_time``."""
         self._finish(CANCELLED, cancelled_time)
+
+    @locked
+    def request_cancel(self):
+        """Ask the run this observer is bound to, wherever it runs, to stop."""
+        state = self._state()
+        if state in LIVE:
+            self._set_run(None, CANCELING)
+            self._persist()
+        elif state != OSLC_AUTO.canceling:
+            raise RuntimeError(f"run {self.run_id} is not queued or running, its state is {state}")
+
+    @locked
+    def cancel_requested(self):
+        """Whether this run was asked to stop, here or through the store."""
+        return OSLC_AUTO.canceling in (self._state(), self._stored_state())
 
     @locked
     def log_completed_run(self, completed_time: datetime):
@@ -251,7 +268,20 @@ class GraphObserver(BaseObserver):
         self._persist()
 
     def _persist(self):
+        """Write the graph, first adopting a cancel request another writer left in the store."""
+        if self._state() in LIVE and self._stored_state() == OSLC_AUTO.canceling:
+            self._set_run(None, CANCELING)
+        self._write()
+
+    def _write(self):
         raise NotImplementedError
+
+    def _stored_state(self):
+        """The run's ``oslc_auto:state`` as the store has it now, or None."""
+        raise NotImplementedError
+
+    def _state(self):
+        return self.graph.value(self.run, OSLC_AUTO.state)
 
     def _set_run(self, run_id, lifecycle):
         if run_id is not None:

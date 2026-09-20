@@ -30,6 +30,12 @@ class BaseObserver:
     def close(self):
         raise NotImplementedError
 
+    def request_cancel(self):
+        pass
+
+    def cancel_requested(self):
+        return False
+
     def set_file_source(self, archive_path):
         pass
 

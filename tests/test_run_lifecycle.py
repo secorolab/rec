@@ -184,6 +184,84 @@ def test_started_run_without_trigger_is_unqualified(tmp_path):
     assert graph.value(REC_RUN["run-8"], PROV.qualifiedStart) is None
 
 
+class WaitingRun(Run):
+    """A cooperative main: it works until asked to stop."""
+
+    def main(self):
+        self.cancel_requested.wait(timeout=10)
+        return "stopped" if self.cancel_requested.is_set() else "finished"
+
+
+def running(path, run_id):
+    run = WaitingRun(observers=[FileObserver(path)], run_id=run_id)
+    run.beat_interval = 0.05
+    thread = threading.Thread(target=run.run)
+    thread.start()
+    while run.status is not RunStatus.RUNNING:
+        pass
+    return run, thread
+
+
+def test_a_running_run_is_cancelled_through_its_archive(tmp_path):
+    """Another process holds only the archive, so it cancels by run id through an observer."""
+    path = tmp_path / "rec.ld.json"
+    run, thread = running(path, "run-11")
+
+    FileObserver(path).request_cancel()
+    thread.join(timeout=5)
+
+    assert run.result == "stopped"
+    assert run.status is RunStatus.CANCELLED
+    graph = Graph().parse(path, format="json-ld")
+    activity = REC_RUN["run-11"]
+    assert lifecycle(graph, activity) == (OSLC_AUTO.canceled, OSLC_AUTO.unavailable)
+    assert graph.value(activity, PROV.startedAtTime) is not None
+    assert graph.value(activity, PROV.endedAtTime) is not None
+
+
+def test_a_running_run_is_cancelled_in_process(tmp_path):
+    path = tmp_path / "rec.ld.json"
+    run, thread = running(path, "run-12")
+
+    run.cancel()
+    thread.join(timeout=5)
+
+    assert run.result == "stopped"
+    assert lifecycle(Graph().parse(path, format="json-ld"), REC_RUN["run-12"]) == (
+        OSLC_AUTO.canceled,
+        OSLC_AUTO.unavailable,
+    )
+
+
+def test_a_queued_run_cancelled_through_its_archive_never_starts(tmp_path):
+    path = tmp_path / "rec.ld.json"
+    run = WaitingRun(observers=[FileObserver(path)], run_id="run-13")
+    run.queue()
+
+    FileObserver(path).request_cancel()
+    assert run.run() is None
+
+    assert run.status is RunStatus.CANCELLED
+    graph = Graph().parse(path, format="json-ld")
+    assert lifecycle(graph, REC_RUN["run-13"]) == (OSLC_AUTO.canceled, OSLC_AUTO.unavailable)
+    assert graph.value(REC_RUN["run-13"], PROV.startedAtTime) is None
+
+
+def test_a_finished_run_refuses_a_cancel_request(tmp_path):
+    path = tmp_path / "rec.ld.json"
+    run = Run(observers=[FileObserver(path)], run_id="run-14")
+    run._emit_started()
+    run._emit_completed()
+    with pytest.raises(RuntimeError, match="not queued or running"):
+        FileObserver(path).request_cancel()
+    # Asking twice is not an error: the second request finds the first.
+    run, thread = running(tmp_path / "again" / "rec.ld.json", "run-15")
+    FileObserver(tmp_path / "again" / "rec.ld.json").request_cancel()
+    FileObserver(tmp_path / "again" / "rec.ld.json").request_cancel()
+    thread.join(timeout=5)
+    assert run.status is RunStatus.CANCELLED
+
+
 def test_cancelled_run_cannot_start(tmp_path):
     run = Run(observers=[FileObserver(tmp_path / "rec.ld.json")], run_id="run-3")
     run.queue()
