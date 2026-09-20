@@ -55,14 +55,14 @@ def document(run_iri, record):
         associated.append(node["@id"])
         nodes.append(node)
     for row in record.get("repositories") or []:
-        node = {"@id": f"{run_iri}/repository/{_slug(row['name'])}", "@type": ["Agent", "SoftwareAgent"]}
+        node = {"@id": f"{run_iri}/repository/{quote(row['name'], safe='')}", "@type": ["Agent", "SoftwareAgent"]}
         node["name"] = row["name"]
         _set(node, "identifier", row.get("commit"))
         _set(node, "codeRepository", _url(row.get("url")))
         associated.append(node["@id"])
         nodes.append(node)
     for row in record.get("dependencies") or []:
-        node = {"@id": f"{run_iri}/dependency/{_slug(row['name'])}", "@type": ["Agent", "SoftwareAgent"]}
+        node = {"@id": f"{run_iri}/dependency/{quote(row['name'], safe='')}", "@type": ["Agent", "SoftwareAgent"]}
         node["name"] = row["name"]
         _set(node, "softwareVersion", row.get("version"))
         associated.append(node["@id"])
@@ -79,7 +79,7 @@ def document(run_iri, record):
         entity = _entity(run_iri, row)
         activity = row.get("activity") or run_iri
         usage = {
-            "@id": f"{run_iri}/usage/{_slug(activity.rsplit('/', 1)[-1])}/{_slug(row['path'])}",
+            "@id": f"{run_iri}/usage/{quote(activity.rsplit('/', 1)[-1], safe='')}/{quote(row['path'], safe='')}",
             "@type": "Usage",
             "entity": entity["@id"],
         }
@@ -97,7 +97,7 @@ def document(run_iri, record):
     for row in record.get("artefacts") or []:
         entity = _entity(run_iri, row)
         activity = row.get("activity") or run_iri
-        generation = {"@id": f"{run_iri}/generation/{_slug(row['path'])}", "@type": "Generation", "activity": activity}
+        generation = {"@id": f"{run_iri}/generation/{quote(row['path'], safe='')}", "@type": "Generation", "activity": activity}
         _set(generation, "atTime", row.get("time"))
         entity["wasGeneratedBy"] = activity
         entity["qualifiedGeneration"] = generation["@id"]
@@ -107,7 +107,7 @@ def document(run_iri, record):
 
     for row in record.get("metrics") or []:
         node = {
-            "@id": f"{run_iri}/metric/{_slug(row['name'])}/{row['step']}",
+            "@id": f"{run_iri}/metric/{quote(row['name'], safe='')}/{row['step']}",
             "@type": ["Entity", "Metric"],
             "wasGeneratedBy": run_iri,
             "label": row["name"],
@@ -192,11 +192,11 @@ def record(doc):
 
 def _entity(run_iri, row):
     path = row["path"]
-    node = {"@id": f"{run_iri}/entity/{_slug(path)}", "@type": "Entity", "atLocation": _location(path)}
+    node = {"@id": f"{run_iri}/entity/{quote(path, safe='')}", "@type": "Entity", "atLocation": _location(path)}
     _set(node, "label", row.get("title"))
     if row.get("sha256"):
         node["checksum"] = {
-            "@id": f"{run_iri}/checksum/{_slug(path)}",
+            "@id": f"{run_iri}/checksum/{quote(path, safe='')}",
             "@type": "Checksum",
             "algorithm": "sha256",
             "checksum-value": row["sha256"],
@@ -231,11 +231,6 @@ def _url(value):
         return None
     text = re.sub(r"^[^@/:]+@([^:/]+):", r"https://\1/", str(value))
     return text if "://" in text else None
-
-
-def _slug(value):
-    """One IRI path segment per value, and a different one for every different value."""
-    return quote(str(value), safe="")
 
 
 def _set(node, key, value):
