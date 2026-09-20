@@ -125,13 +125,14 @@ class Run:
         :param starter: The activity that generated the trigger
         :return:
         """
-        self.state, self.verdict = State.IN_PROGRESS, Verdict.UNAVAILABLE
-        self.start_time = datetime.datetime.now(datetime.UTC)
+        start_time = datetime.datetime.now(datetime.UTC)
         logger.info("Starting run %s", self.id)
 
-        # Update info on observers
+        # The stores go first: one of them may hold a cancellation this object never saw.
         for observer in self.observers:
-            observer.log_started_run(self.id, self.start_time, trigger=trigger, starter=starter)
+            observer.log_started_run(self.id, start_time, trigger=trigger, starter=starter)
+        self.state, self.verdict = State.IN_PROGRESS, Verdict.UNAVAILABLE
+        self.start_time = start_time
         self.log_host_info(host_info())
 
     def _emit_completed(self):
@@ -190,9 +191,9 @@ class Run:
         """
         if self.state is State.CANCELED:
             raise RuntimeError("cannot start a cancelled run")
+        self._emit_started(trigger, starter)
 
         try:
-            self._emit_started(trigger, starter)
             self._start_heartbeat()
             self._execute_hooks(self.pre_run_hooks)
             self.result = self.main()

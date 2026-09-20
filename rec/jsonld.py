@@ -2,6 +2,7 @@
 
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 from rec import State, Verdict
 
@@ -158,11 +159,13 @@ def record(doc):
         else:
             kind = next(kind for kind in node["@type"] if kind != "Agent")
             rec.setdefault("agents", []).append(_drop_none({"id": agent_id, "type": kind, "name": node.get("name")}))
-    usages = {nodes[usage]["entity"]: nodes[usage] for node in doc["@graph"] for usage in node.get("qualifiedUsage") or []}
+    usages = {
+        (node["@id"], nodes[usage]["entity"]): nodes[usage] for node in doc["@graph"] for usage in node.get("qualifiedUsage") or []
+    }
     for node in doc["@graph"]:
         for entity_id in node.get("used") or []:
             entity = nodes[entity_id]
-            usage = usages.get(entity_id)
+            usage = usages.get((node["@id"], entity_id))
             if usage is None:
                 rec.setdefault("sources", []).append(_file(entity))
             else:
@@ -231,7 +234,8 @@ def _url(value):
 
 
 def _slug(value):
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", str(value)).strip("_") or "item"
+    """One IRI path segment per value, and a different one for every different value."""
+    return quote(str(value), safe="")
 
 
 def _set(node, key, value):

@@ -25,8 +25,12 @@ class CalibrationRun(Run):
         self.log_repositories([{"name": "controller", "url": "git@example.org:lab/controller.git", "commit": "0123abcd"}])
         # The package built from the repository shares its name: two agents, not one.
         self.log_dependencies([{"name": "rdflib", "version": "7.7.0"}, {"name": "controller", "version": "1.2"}])
+        # One file used by two activities, and two files whose names differ by one character.
         self.add_resource("config/robot.yaml", usage_activity="https://example.org/activity/calibration")
+        self.add_resource("config/robot.yaml", usage_activity="https://example.org/activity/verification")
         self.add_artefact("results/calibration.json", sha256="deadbeef", size_bytes=4)
+        self.add_artefact("results/a b.json")
+        self.add_artefact("results/a_b.json")
         self.log_scalar("position-error", 0.5)
         self.log_scalar("position-error", 0.3)
         self.log_scalar("frames", 10, step=7)
@@ -98,6 +102,8 @@ def test_the_document_round_trips_through_its_record(tmp_path):
     assert [m["step"] for m in record["metrics"]] == [0, 1, 7]
     assert [row["name"] for row in record["repositories"]] == ["controller"]
     assert [row["name"] for row in record["dependencies"]] == ["rdflib", "controller"]
+    assert [row["activity"].rsplit("/", 1)[-1] for row in record["resources"]] == ["calibration", "verification"]
+    assert [row["path"] for row in record["artefacts"]] == ["results/calibration.json", "results/a b.json", "results/a_b.json"]
     assert jsonld.record(observer.document("run-2")) == record
     # Logging a step again replaces its value: one metric node per name and step.
     observer.log_scalar("run-2", "frames", 11, step=7)
@@ -158,6 +164,12 @@ def test_a_queued_run_is_cancelled_by_id_from_the_store(tmp_path):
     assert lifecycle(g, node) == (OSLC_AUTO.canceled, OSLC_AUTO.unavailable)
     assert g.value(node, PROV.startedAtTime) is None
     assert g.value(node, REC["queued-time"]) is not None
+
+    # The Run object never saw the cancellation; the store did, and that is what decides.
+    with pytest.raises(RuntimeError, match="cancelled"):
+        run.run()
+    assert run.state is State.QUEUED
+    assert observer.get_run("run-q")["state"] is State.CANCELED
 
 
 def test_a_run_mints_one_id_for_every_observer(tmp_path):

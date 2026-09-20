@@ -214,7 +214,7 @@ class MariaDBObserver(BaseObserver):
         :return:
         """
         self.cursor.close()
-        # self.conn.close()
+        self.conn.close()
 
 
 if __name__ == "__main__":

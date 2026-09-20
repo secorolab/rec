@@ -22,8 +22,7 @@ def observer():
     db = MariaDBObserver(db_name=TEST_DATABASE, table=table)
     yield db
     db.cursor.execute(f"DROP TABLE IF EXISTS {table}")
-    db.cursor.close()
-    db.conn.close()
+    db.close()
 
 
 class QuickRun(Run):

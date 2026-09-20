@@ -43,9 +43,12 @@ class BaseObserver:
         self._lifecycle(run_id, State.QUEUED, Verdict.UNAVAILABLE, queued_time=queued_time.isoformat())
 
     def log_started_run(self, run_id: str, started_time: datetime, trigger=None, starter=None):
-        self._lifecycle(
-            run_id, State.IN_PROGRESS, Verdict.UNAVAILABLE, start_time=started_time.isoformat(), trigger=trigger, starter=starter
-        )
+        with self._lock:
+            if self.get_run(run_id).get("state") is State.CANCELED:
+                raise RuntimeError(f"run {run_id} was cancelled")
+            self._lifecycle(
+                run_id, State.IN_PROGRESS, Verdict.UNAVAILABLE, start_time=started_time.isoformat(), trigger=trigger, starter=starter
+            )
 
     def log_run_heartbeat(self, run_id: str, beat_time: datetime, result):
         self._run_info(run_id, heartbeat_time=beat_time.isoformat(), result=result)
