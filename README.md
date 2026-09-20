@@ -11,13 +11,22 @@ In your terminal, go to where you have cloned this repository and install it in 
 pip install -e .
 ```
 
+Add the MariaDB backend when runs are stored in a database:
+
+```shell
+pip install -e ".[mariadb]"
+```
+
 ## Examples
 
 The current skeleton of the code allows you to run two examples: The `MariaDBObserver` and a `Run`.
 
 ### Observers
 
-An Observer is an interface to a type of data storage. For now, we have added a `MariaDBObserver` with some basic functionality. To test it you can run the following in your terminal:
+An Observer is an interface to a type of data storage. One observer holds any number of runs;
+every call names the run it is about, and whoever created the observer closes it once its runs
+are over. `FileObserver` keeps one JSON-LD document per run in a directory, `MariaDBObserver`
+one row per run in a table. To test the latter you can run the following in your terminal:
 
 ```shell
 python rec/observers/mariadb_observer.py
@@ -31,6 +40,18 @@ The [example](examples/decentral_run.py) shows how to create a run object, attac
 python examples/decentral_run.py
 ```
 
+### What a run records
+
+A run is a `prov-ext:Execution` on the
+[rec and prov-extension vocabularies](https://secorolab.github.io/metamodels/). Its lifecycle is
+an OSLC Automation state and verdict (`rec.State` and `rec.Verdict`: a run is `queued`,
+`in-progress`, `canceled` or `complete`, and once complete `passed`, `failed` or `error`; a
+verdict is `unavailable` before that), its host a `rec:Host`, sources and resources what it
+`prov:used`, artefacts what it generated with checksum and size, repositories and dependencies
+the software agents it ran with, and scalars `rec:Metric` quantities. Every observer stores the
+same columns and `observer.document(run_id)` returns the run as JSON-LD; `FileObserver` writes
+that document. The run node is `https://secoro.uni-bremen.de/rec/run/<run_id>` unless an
+observer is given another `base`.
 
 ## Connecting to MariaDB
 
@@ -42,6 +63,18 @@ MARIADB_PASSWORD="pass12345"
 MARIADB_HOST="localhost"
 MARIADB_PORT=3306
 ```
+
+## Tests
+
+```shell
+pip install -e ".[dev]"
+pytest
+```
+
+The conformance test validates a recorded run against the shapes in a
+[metamodels](https://github.com/secorolab/metamodels) checkout beside this repository or at
+`REC_METAMODELS_DIR`. MariaDB tests need the `mariadb` extra and a disposable database named by
+`REC_TEST_MARIADB_DATABASE`.
 
 ## Acknowledgments
 
