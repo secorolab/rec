@@ -1,152 +1,203 @@
-# SPDX-License-Identifier: MPL-2.0
-# SPDX-FileCopyrightText: 2026 SECORO AG (secoro.uni-bremen.de)
-# Author: Argentina Ortega
-
-"""MariaDB-backed REC graph observer."""
-
-import io
+import sys
 import os
-import re
-from pathlib import Path
-from uuid import uuid4
+import json
+import datetime as dt
+from datetime import datetime
 
 import mariadb
+
 from dotenv import load_dotenv
-from rdflib import Graph, URIRef
-from rdflib.namespace import PROV
 
-from rec.observers.graph_observer import OSLC_AUTO, GraphObserver, local_name, locked, run_node, serialize
+from rec.observers.base import BaseObserver
+
+JSON_COLUMNS = (
+    "host_info",
+    "sources",
+    "repositories",
+    "dependencies",
+    "metrics",
+    "agents",
+    "resources",
+    "artefacts",
+    "run_info",
+    "data",
+)
 
 
-class MariaDBObserver(GraphObserver):
-    """Persist REC JSON-LD in MariaDB and import file archives.
+class MariaDBObserver(BaseObserver):
+    def __init__(self, db_name="logbook", table="logs", base=None, **kwargs):
+        """
+        Observer in a run that writes to a MariaDB database
 
-    Args:
-        run_id: Existing run to reopen, or an ID generated for a new run.
-        db_name: Database selected from the configured MariaDB server.
-        table: Base table name for runs and file-source mappings.
+        :param db_name: Name of the database
+        :param table: Name of the table, one row per run
+        :param base: IRI base of the run nodes, ``BaseObserver.base`` by default
+        :param kwargs:
+        """
 
-    Attributes:
-        db_id: Short sequential number this database gave the run, for display
-            and ordering. The canonical identity stays the run IRI, which is
-            portable across databases as ``db_id`` is not. Archives synchronised
-            with :meth:`sync_files` are numbered in start-time order.
-    """
-
-    def __init__(self, run_id=None, db_name="logbook", table="runs"):
-        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
-            raise ValueError("table must be a simple SQL identifier")
+        super().__init__()
+        self.db_name = db_name
         self.table = table
-        self.archive_path = None
-        self.db_id = None
+        if base is not None:
+            self.base = base
+
         load_dotenv()
-        self.conn = mariadb.connect(
-            user=os.getenv("MARIADB_USER"),
-            password=os.getenv("MARIADB_PASSWORD"),
-            host=os.getenv("MARIADB_HOST"),
-            port=int(os.getenv("MARIADB_PORT", "3306")),
-            database=db_name,
-        )
-        self.conn.autocommit = True
+
+        # Connect to MariaDB Platform
+        try:
+            self.conn = mariadb.connect(
+                user=os.getenv("MARIADB_USER"),
+                password=os.getenv("MARIADB_PASSWORD"),
+                host=os.getenv("MARIADB_HOST"),
+                port=int(os.getenv("MARIADB_PORT")),
+                database=db_name,
+            )
+            self.conn.autocommit = True  # optional for simplicity
+        except mariadb.Error as e:
+            print(f"Error connecting to MariaDB Platform: {e}")
+            sys.exit(1)
+
+        # Get Cursor
         self.cursor = self.conn.cursor()
-        self.cursor.execute(
-            f"CREATE TABLE IF NOT EXISTS {self.table} ("
-            "db_id BIGINT AUTO_INCREMENT PRIMARY KEY, "
-            "run_id VARCHAR(255) NOT NULL UNIQUE, "
-            "status VARCHAR(255) NOT NULL, "
-            "jsonld LONGTEXT NOT NULL)"
-        )
-        self.file_sources_table = f"{self.table}_file_sources"
-        self.cursor.execute(
-            f"CREATE TABLE IF NOT EXISTS {self.file_sources_table} ("
-            "run_id VARCHAR(255) PRIMARY KEY, "
-            "archive_path TEXT NOT NULL, "
-            "started_at DATETIME(6) NOT NULL, "
-            "synced_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP, "
-            "INDEX (started_at))"
-        )
-        super().__init__(run_id or f"run-{uuid4()}")
-        self._load_existing()
+        print(f"Connected to MariaDB Platform: {self.db_name}")
 
-    def _load_existing(self):
-        self.cursor.execute(f"SELECT jsonld FROM {self.table} WHERE run_id = ?", (self.run_id,))
-        row = self.cursor.fetchone()
-        if row:
-            self.graph.parse(io.StringIO(row[0]), format="json-ld")
+        # Create the table if it doesn't exist. `id` is a short number to display and sort by;
+        # `run_id` is the run's identity, the same in every store.
+        try:
+            self.cursor.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {self.table} (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    run_id VARCHAR(255) NOT NULL UNIQUE,
+                    status VARCHAR(20) NOT NULL,
+                    scenario_id VARCHAR(20),
+                    host_info JSON,
+                    sources JSON,
+                    repositories JSON,
+                    dependencies JSON,
+                    metrics JSON,
+                    agents JSON,
+                    resources JSON,
+                    artefacts JSON,
+                    run_info JSON,
+                    data JSON
+                )
+            """
+            )
+            print(f"Table '{self.table}' created or already exists.")
+        except mariadb.Error as e:
+            print(f"Error creating table: {e}")
+            self.conn.rollback()  # Rollback in case of DDL error
 
-    def _write(self):
-        if self.archive_path is not None:
-            self._set_location(self.archive_path)
-        self._upsert(self.run_id, self.graph)
-        if self.archive_path is not None:
-            started_at = self.graph.value(self.run, PROV.startedAtTime)
-            if started_at is not None:
-                self._upsert_file_source(self.run_id, self.archive_path, started_at.toPython())
+    def add_run(self, run_id: str, status: str) -> int:
+        """
+        Saves a new run to the MariaDB database
+        :param run_id: The run's identity
+        :param status: The status of the run being added (RUNNING or QUEUED)
+        :return: The short number the database assigned
+        """
+        template = f"INSERT INTO {self.table} (run_id, status) VALUES (?, ?);"
+        try:
+            self.cursor.execute(template, (run_id, status))
+        except mariadb.Error as e:
+            print(f"Error: {e}")
 
-    def _stored_state(self):
-        self.cursor.execute(f"SELECT status FROM {self.table} WHERE run_id = ?", (self.run_id,))
-        row = self.cursor.fetchone()
-        return URIRef(row[0]) if row else None
+        return self.cursor.lastrowid
 
-    def set_file_source(self, archive_path):
-        """Associate this live database run with its file-backed source."""
-        self.archive_path = str(archive_path)
+    def update_run_data(self, run_id: str, column: str, data):
+        """
+        Updates the data of a run in a particular column; a run not in the table yet is added
+        :param run_id:
+        :param column:
+        :param data:
+        :return:
+        """
+        if column in JSON_COLUMNS:
+            d = json.dumps(data)
+        else:
+            d = data
 
-    @locked
-    def sync_file(self, path):
-        """Import one file-backed run without changing its REC identities."""
-        graph = Graph().parse(path, format="json-ld")
-        run = run_node(graph)
-        if run is None:
-            raise ValueError("file describes no run")
-        run_id = local_name(run)
-        started_at = graph.value(run, PROV.startedAtTime)
-        if started_at is None:
-            raise ValueError("file has no prov:startedAtTime")
-        self._upsert(run_id, graph)
-        self._upsert_file_source(run_id, path, started_at.toPython())
+        try:
+            with self._lock:
+                if self.db_id(run_id) is None:
+                    self.add_run(run_id, data if column == "status" else "QUEUED")
+                self.cursor.execute(
+                    f"UPDATE {self.table} SET {column} = ? WHERE run_id = ?",
+                    (d, run_id),
+                )
+        except mariadb.Error as e:
+            print(f"An error occurred: {e}")
+            self.conn.rollback()  # Rollback in case of DDL error
+            sys.exit(1)
 
-    def sync_files(self, directory, started_after=None):
-        """Import archive files in start-time order, optionally after a cursor."""
-        files = []
-        for path in sorted(Path(directory).rglob("*.ld.json")):
-            graph = Graph().parse(path, format="json-ld")
-            run = run_node(graph)
-            started_at = graph.value(run, PROV.startedAtTime) if run else None
-            if started_at is not None and (started_after is None or started_at.toPython() > started_after):
-                files.append((started_at.toPython(), path))
-        for _, path in sorted(files):
-            self.sync_file(path)
-        return len(files)
-
-    def _upsert(self, run_id, graph):
-        run = run_node(graph)
-        status = str(graph.value(run, OSLC_AUTO.state) if run else OSLC_AUTO.queued)
-        self.cursor.execute(
-            f"INSERT INTO {self.table} (run_id, status, jsonld) VALUES (?, ?, ?) "
-            "ON DUPLICATE KEY UPDATE status = VALUES(status), jsonld = VALUES(jsonld)",
-            (run_id, status, serialize(graph)),
-        )
-        if run_id == self.run_id and self.db_id is None:
-            self.db_id = self._db_id(run_id)
-
-    def _db_id(self, run_id):
-        self.cursor.execute(f"SELECT db_id FROM {self.table} WHERE run_id = ?", (run_id,))
+    def db_id(self, run_id: str):
+        """The short number the database gave a run, or None when it holds no such run"""
+        self.cursor.execute(f"SELECT id FROM {self.table} WHERE run_id=?;", (run_id,))
         row = self.cursor.fetchone()
         return row[0] if row else None
 
-    def _upsert_file_source(self, run_id, archive_path, started_at):
-        self.cursor.execute(
-            f"INSERT INTO {self.file_sources_table} (run_id, archive_path, started_at) "
-            "VALUES (?, ?, ?) "
-            "ON DUPLICATE KEY UPDATE archive_path = VALUES(archive_path), started_at = VALUES(started_at)",
-            (run_id, str(archive_path), started_at),
-        )
+    def get_run(self, run_id: str):
+        """
+        Queries the MariaDB database for a run's data
+        :param run_id:
+        :return:
+        """
+        cols = ["id", "status", "scenario_id", *JSON_COLUMNS]
+        try:
+            self.cursor.execute(
+                "SELECT {} FROM {} WHERE run_id=?;".format(", ".join(cols), self.table),
+                (run_id,),
+            )
+        except mariadb.Error as e:
+            print(f"An error occurred: {e}")
+            sys.exit(1)
 
-    @locked
+        d = {}
+        for row in self.cursor:
+            d = dict(id=row[0], status=row[1], scenario_id=row[2])
+            for k, v in zip(cols[3:], row[3:]):
+                if v is not None:
+                    d[k] = json.loads(v)
+
+        return d
+
+    def query_active_run(self):
+        try:
+            self.cursor.execute(
+                f"SELECT run_id, status FROM {self.table} WHERE status ='RUNNING'"
+            )
+        except mariadb.Error as e:
+            print(f"An error occurred: {e}")
+            sys.exit(1)
+
+        for row in self.cursor:
+            return row[0]
+
     def close(self):
-        """Flush a live run, then close the database cursor and connection."""
-        if self.graph.value(self.run, OSLC_AUTO.state) is not None:
-            self._persist()
+        """
+        This method must be called when the run is over to close the connection to the DB
+        :return:
+        """
         self.cursor.close()
-        self.conn.close()
+        # self.conn.close()
+
+
+if __name__ == "__main__":
+    db = MariaDBObserver()
+    print("Writing to the DB dummy data")
+    run_id = "db-test-01"
+    db.log_started_run(run_id, datetime.now(dt.UTC))
+    info = db.get_run(run_id)
+    print(info)
+
+    db.update_run_data(run_id, "scenario_id", "db-test-01")
+    db.add_agent(run_id, "https://example.org/agent/robot-01", "SoftwareAgent", name="robot-01")
+    db.query_active_run()
+    db.log_completed_run(run_id, datetime.now(dt.UTC))
+
+    print("Getting run info")
+    info = db.get_run(run_id)
+    print(info)
+    print(json.dumps(db.document(run_id), indent=2))
+
+    db.close()

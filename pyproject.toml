@@ -4,21 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rec"
-version = "0.1.0"
 description = "Robot Execution Catalog (REC) is a python library to manage data from robot runs"
-dependencies = [
-    "rdflib"
-]
-requires-python = ">= 3.11"
+dynamic = ["version"]
+dependencies = []
+requires-python = ">= 3.12"
 readme = "README.md"
 maintainers = [
   {name = "SECORO Group", email = "secoro@groups.uni-bremen.de"}
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "pyshacl"]
-mariadb = ["mariadb", "python-dotenv"]
-docs = ["sphinx", "furo"]
+mariadb = ["dotenv", "mariadb"]
+dev = ["black>=24.4.2", "pytest", "rdflib", "pyshacl"]
 
 [tool.setuptools.packages.find]
-where = ["."]
+where = ["."]  # list of folders that contain the packages (["."] by default)

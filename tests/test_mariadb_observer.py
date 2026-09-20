@@ -1,23 +1,12 @@
-# SPDX-License-Identifier: MPL-2.0
-# SPDX-FileCopyrightText: 2026 SECORO AG (secoro.uni-bremen.de)
-# Author: Vamsi Kalagaturu
-
-"""MariaDB integration tests for REC observer storage and file synchronisation."""
-
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
-from rdflib import Graph
-from rdflib.namespace import PROV, RDF
-
-from rec.observers import FileObserver
-from rec.observers.graph_observer import OSLC_AUTO, PROV_EXT, REC_RUN
-from rec.run import Run
 
 pytest.importorskip("mariadb", reason="the MariaDB driver is an optional extra")
-from rec.observers import MariaDBObserver  # noqa: E402
+from rec.observers.mariadb_observer import MariaDBObserver  # noqa: E402
+from rec.run import Run, RunStatus  # noqa: E402
 
 TEST_DATABASE = os.getenv("REC_TEST_MARIADB_DATABASE")
 pytestmark = pytest.mark.skipif(
@@ -27,106 +16,36 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def database():
-    """Provide isolated tables in the explicitly configured test database."""
-    tables = []
-
-    def create():
-        table = f"rec_test_{uuid4().hex}"
-        observer = MariaDBObserver(db_name=TEST_DATABASE, table=table)
-        tables.append((observer.conn, observer.cursor, table))
-        return observer
-
-    yield create
-
-    for conn, cursor, table in tables:
-        cursor.execute(f"DROP TABLE IF EXISTS {table}_file_sources")
-        cursor.execute(f"DROP TABLE IF EXISTS {table}")
-        cursor.close()
-        conn.close()
+def observer():
+    table = f"rec_test_{uuid4().hex}"
+    db = MariaDBObserver(db_name=TEST_DATABASE, table=table)
+    yield db
+    db.cursor.execute(f"DROP TABLE IF EXISTS {table}")
+    db.cursor.close()
+    db.conn.close()
 
 
-def stored_graph(observer, run_id):
-    observer.cursor.execute(f"SELECT jsonld FROM {observer.table} WHERE run_id = ?", (run_id,))
-    return Graph().parse(data=observer.cursor.fetchone()[0], format="json-ld")
+class QuickRun(Run):
+    def main(self):
+        self.log_scalar("frames", 1)
+        return "ok"
 
 
-def file_run(path, run_id, started_at):
-    observer = FileObserver(path)
-    observer.log_started_run(run_id, started_at)
-    observer.log_completed_run(started_at + timedelta(seconds=1))
-    return observer
+def test_one_connection_records_many_runs(observer):
+    runs = [QuickRun(observers=[observer], run_id=f"run-{i}") for i in range(3)]
+    for run in runs:
+        run.beat_interval = 0
+        run.run()
+    for number, run in enumerate(runs, start=1):
+        record = observer.get_run(run.id)
+        assert record["status"] == "COMPLETED"
+        assert record["id"] == number
+        assert record["metrics"] == [{"name": "frames", "value": 1, "step": 0, "time": record["metrics"][0]["time"]}]
+    assert observer.document("run-0")["@graph"][0]["state"] == "complete"
 
 
-def test_mariadb_only_run(database):
-    observer = database()
-    run = Run(observers=[observer], run_id="db-only")
-    run._emit_started()
-    run._emit_completed()
-
-    graph = stored_graph(observer, "db-only")
-    node = REC_RUN["db-only"]
-    assert (node, RDF.type, PROV_EXT.Execution) in graph
-    assert graph.value(node, OSLC_AUTO.verdict) == OSLC_AUTO.passed
-    assert graph.value(node, PROV.atLocation) is None
-
-
-def test_runs_get_sequential_database_numbers(database, tmp_path):
-    observer = database()
-    Run(observers=[observer], run_id="first")._emit_started()
-    assert observer.db_id == 1
-
-    later = MariaDBObserver(run_id="second", db_name=TEST_DATABASE, table=observer.table)
-    Run(observers=[later], run_id="second")._emit_started()
-    assert later.db_id == 2
-
-    reopened = MariaDBObserver(run_id="first", db_name=TEST_DATABASE, table=observer.table)
-    reopened.log_completed_run(datetime.now(UTC))
-    assert reopened.db_id == 1
-    later.close()
-    reopened.close()
-
-
-def test_file_and_mariadb_share_the_archive_location(database, tmp_path):
-    path = tmp_path / "run.ld.json"
-    db = database()
-    file = FileObserver(path)
-    run = Run(observers=[file, db], run_id="both")
-    run._emit_started()
-    run._emit_completed()
-
-    graph = stored_graph(db, "both")
-    node = REC_RUN["both"]
-    assert str(graph.value(node, PROV.atLocation)).endswith("run.ld.json")
-    db.cursor.execute(
-        f"SELECT run_id, archive_path FROM {db.file_sources_table} WHERE run_id = ?",
-        ("both",),
-    )
-    assert db.cursor.fetchone() == ("both", str(path))
-
-
-def test_sync_file_preserves_the_archive_location(database, tmp_path):
-    path = tmp_path / "run.ld.json"
-    file = file_run(path, "file-only", datetime(2026, 1, 1, tzinfo=UTC))
-    db = database()
-
-    db.sync_file(path)
-
-    graph = stored_graph(db, "file-only")
-    node = REC_RUN["file-only"]
-    assert str(graph.value(node, PROV.atLocation)).endswith("run.ld.json")
-
-
-def test_sync_files_uses_started_at_time_order_and_cursor(database, tmp_path):
-    early = file_run(tmp_path / "early.ld.json", "early", datetime(2026, 1, 1, tzinfo=UTC))
-    late = file_run(tmp_path / "late.ld.json", "late", datetime(2026, 1, 2, tzinfo=UTC))
-    db = database()
-    synced = []
-    sync_file = db.sync_file
-    db.sync_file = lambda path: (synced.append(path.name), sync_file(path))[1]
-
-    assert db.sync_files(tmp_path) == 2
-    assert synced == ["early.ld.json", "late.ld.json"]
-    assert db.sync_files(tmp_path, started_after=datetime(2026, 1, 1, 12, tzinfo=UTC)) == 1
-    db.cursor.execute(f"SELECT run_id FROM {db.file_sources_table} ORDER BY started_at")
-    assert [row[0] for row in db.cursor] == [early.run_id, late.run_id]
+def test_a_queued_run_is_cancelled_by_id(observer):
+    QuickRun(observers=[observer], run_id="queued").queue()
+    assert observer.query_active_run() is None
+    observer.log_cancelled_run("queued", datetime.now(UTC))
+    assert observer.get_run("queued")["status"] == RunStatus.CANCELLED

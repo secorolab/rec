@@ -1,51 +1,52 @@
-# SPDX-License-Identifier: MPL-2.0
-# SPDX-FileCopyrightText: 2026 SECORO AG (secoro.uni-bremen.de)
-# Author: Vamsi Kalagaturu
-
-"""File-backed REC graph observer."""
+"""Observer that keeps one JSON-LD document per run in a directory."""
 
 import json
 from pathlib import Path
 
-from rec.observers.graph_observer import OSLC_AUTO, GraphObserver, local_name, run_node, serialize
+from rec import jsonld
+from rec.observers.base import BaseObserver
 
 
-class FileObserver(GraphObserver):
-    """Persist one REC graph as JSON-LD.
+class FileObserver(BaseObserver):
+    def __init__(self, directory, base=None):
+        """
+        Observer that writes each run to ``<directory>/<run_id>.ld.json``
 
-    Args:
-        path: Archive file to create or reopen.
-        run_iri: IRI of the run node, when the caller already minted it elsewhere.
-    """
+        :param directory: Where the documents go; created on first write
+        :param base: IRI base of the run nodes, ``BaseObserver.base`` by default
+        """
+        super().__init__()
+        self.directory = Path(directory)
+        if base is not None:
+            self.base = base
 
-    def __init__(self, path, run_iri=None):
-        self.path = Path(path)
-        super().__init__("unbound", run_iri)
-        if self.path.exists():
-            self.graph.parse(self.path, format="json-ld")
-            run = run_node(self.graph)
-            if run is None:
-                raise ValueError("existing file describes no run")
-            self.run_id = local_name(run)
-            # Reopening must continue the archive's own run node, never fork a second one.
-            self.run_iri = self.run_iri or run
+    def path(self, run_id: str) -> Path:
+        return self.directory / f"{run_id}.ld.json"
 
-    def _write(self):
-        # The archive is the directory this file sits in, so its own name is the portable path.
-        self._set_location(self.path.name)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        temporary.write_text(serialize(self.graph) + "\n")
-        temporary.replace(self.path)
+    def get_run(self, run_id):
+        path = self.path(run_id)
+        return jsonld.record(json.loads(path.read_text())) if path.exists() else {}
 
-    def _stored_state(self):
-        # A plain JSON scan of our own compaction: parsing with rdflib fetches the context.
-        try:
-            document = json.loads(self.path.read_text())
-        except (OSError, ValueError):
-            return None
-        for node in document.get("@graph", [document]):
-            state = node.get("oslc_auto:state")
-            if isinstance(state, dict):
-                return OSLC_AUTO[state["@id"].removeprefix("oslc_auto:")]
+    def update_run_data(self, run_id, column, data):
+        with self._lock:
+            record = self.get_run(run_id)
+            record[column] = data
+            if "status" not in record:
+                return
+            self.directory.mkdir(parents=True, exist_ok=True)
+            temporary = self.path(run_id).with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.document_of(run_id, record), indent=2) + "\n")
+            temporary.replace(self.path(run_id))
+
+    def document_of(self, run_id, record):
+        return jsonld.document(self.run_iri(run_id), record)
+
+    def query_active_run(self):
+        for path in sorted(self.directory.glob("*.ld.json")):
+            run_id = path.name.removesuffix(".ld.json")
+            if self.get_run(run_id).get("status") == "RUNNING":
+                return run_id
         return None
+
+    def close(self):
+        pass
