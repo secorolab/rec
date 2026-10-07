@@ -1,5 +1,6 @@
+from rec.observer import Observer
 from rec.run import Run
-from rec.observers.mariadb_observer import MariaDBObserver
+from rec.stores.mariadb_store import MariaDBStore
 
 
 def main():
@@ -10,8 +11,9 @@ def main():
 
 
 if __name__ == "__main__":
-    run = Run()
+    observer = Observer(MariaDBStore())
+    run = Run(observers=[observer])
     run.main = main
-    run.observers.append(MariaDBObserver())
 
     run.run()
+    observer.close()
