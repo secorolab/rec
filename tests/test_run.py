@@ -132,7 +132,7 @@ def test_only_a_run_that_has_not_started_is_cancelled(store):
     queued.queue()
     # A scheduler holding only the store cancels a run it did not create, and the store decides.
     Observer(store).log_cancelled_run("run-q", datetime.now(UTC))
-    with pytest.raises(RuntimeError, match="cancelled"):
+    with pytest.raises(RuntimeError, match="is canceled"):
         queued.run()
     assert (store.load("run-q").state, store.load("run-q").verdict) == (State.CANCELED, Verdict.UNAVAILABLE)
 
