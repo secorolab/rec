@@ -127,7 +127,7 @@ def test_a_post_run_hook_that_raises_leaves_the_run_passed(store):
     assert (store.load("run-h").state, store.load("run-h").verdict) == (State.COMPLETE, Verdict.PASSED)
 
 
-def test_only_a_run_that_has_not_started_is_cancelled(store):
+def test_only_a_queued_run_is_cancelled(store):
     queued = CalibrationRun(observers=[Observer(store)], run_id="run-q")
     queued.queue()
     # A scheduler holding only the store cancels a run it did not create, and the store decides.
@@ -139,7 +139,7 @@ def test_only_a_run_that_has_not_started_is_cancelled(store):
     done = CalibrationRun(observers=[Observer(store)], run_id="run-d")
     done.beat_interval = 0
     done.run()
-    with pytest.raises(RuntimeError, match="has not started"):
+    with pytest.raises(RuntimeError, match="only a queued run"):
         Observer(store).log_cancelled_run("run-d", datetime.now(UTC))
     assert store.load("run-d").verdict is Verdict.PASSED
     assert store.run_ids(State.CANCELED) == ["run-q"]

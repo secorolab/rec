@@ -97,22 +97,19 @@ class Run:
             observer.log_run_heartbeat(self.id, beat_time, result=self.result)
 
     def _emit_cancelled(self):
-        self.state, self.verdict = State.CANCELED, Verdict.UNAVAILABLE
-        cancelled_time = self._stop_time()
-        logger.info("Cancelled run %s", self.id)
-
-        # Update info on observers
+        cancelled_time = datetime.datetime.now(datetime.UTC)
+        # The stores go first, as on start: one of them may refuse.
         for observer in self.observers:
             observer.log_cancelled_run(self.id, cancelled_time)
+        self.state, self.verdict, self.end_time = State.CANCELED, Verdict.UNAVAILABLE, cancelled_time
+        logger.info("Cancelled run %s", self.id)
 
     def _emit_queued(self):
-        self.state, self.verdict = State.QUEUED, Verdict.UNAVAILABLE
         queued_time = datetime.datetime.now(datetime.UTC)
-        logger.info("Queued run %s", self.id)
-
-        # Update info on observers
         for observer in self.observers:
             observer.log_queued_run(self.id, queued_time)
+        self.state, self.verdict = State.QUEUED, Verdict.UNAVAILABLE
+        logger.info("Queued run %s", self.id)
 
     def _emit_started(self, trigger=None, starter=None):
         """
@@ -265,7 +262,7 @@ class Run:
         """
         Add an agent (e.g., a robot) to the run
         :param agent_id: A unique ID for this agent
-        :param agent_type: The type of agent being added, e.g., SoftwareAgent, Person
+        :param agent_type: A PROV agent class: Agent, SoftwareAgent, Person or Organization
         :param name: The agent's name; a software agent must have one
         :return:
         """

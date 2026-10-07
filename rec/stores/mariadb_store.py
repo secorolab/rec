@@ -1,6 +1,7 @@
 """A store keeping each run as one row of a MariaDB table."""
 
 import os
+import threading
 from contextlib import contextmanager
 
 import mariadb
@@ -32,6 +33,8 @@ class MariaDBStore:
         )
         self.conn.autocommit = True
         self.cursor = self.conn.cursor()
+        # One connection for every thread using the store, so one statement or transaction at a time.
+        self._lock = threading.RLock()
         self.cursor.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {table} (
@@ -45,35 +48,38 @@ class MariaDBStore:
         )
 
     def load(self, run_id: str) -> RunRecord | None:
-        self.cursor.execute(f"SELECT record FROM {self.table} WHERE run_id = ?", (run_id,))
-        row = self.cursor.fetchone()
+        with self._lock:
+            self.cursor.execute(f"SELECT record FROM {self.table} WHERE run_id = ?", (run_id,))
+            row = self.cursor.fetchone()
         return from_json(row[0]) if row else None
 
     @contextmanager
     def edit(self, run_id: str):
-        self.conn.begin()
-        try:
-            self.cursor.execute(f"SELECT record FROM {self.table} WHERE run_id = ? FOR UPDATE", (run_id,))
-            row = self.cursor.fetchone()
-            record = from_json(row[0]) if row else RunRecord(run_id)
-            yield record
-            values = (str(record.state), str(record.verdict), to_json(record), run_id)
-            # Not INSERT ... ON DUPLICATE KEY UPDATE: InnoDB spends an `id` on every such update.
-            if row:
-                self.cursor.execute(f"UPDATE {self.table} SET state = ?, verdict = ?, record = ? WHERE run_id = ?", values)
-            else:
-                self.cursor.execute(f"INSERT INTO {self.table} (state, verdict, record, run_id) VALUES (?, ?, ?, ?)", values)
-        except BaseException:
-            self.conn.rollback()
-            raise
-        self.conn.commit()
+        with self._lock:
+            self.conn.begin()
+            try:
+                self.cursor.execute(f"SELECT record FROM {self.table} WHERE run_id = ? FOR UPDATE", (run_id,))
+                row = self.cursor.fetchone()
+                record = from_json(row[0]) if row else RunRecord(run_id)
+                yield record
+                values = (str(record.state), str(record.verdict), to_json(record), run_id)
+                # Not INSERT ... ON DUPLICATE KEY UPDATE: InnoDB spends an `id` on every such update.
+                if row:
+                    self.cursor.execute(f"UPDATE {self.table} SET state = ?, verdict = ?, record = ? WHERE run_id = ?", values)
+                else:
+                    self.cursor.execute(f"INSERT INTO {self.table} (state, verdict, record, run_id) VALUES (?, ?, ?, ?)", values)
+            except BaseException:
+                self.conn.rollback()
+                raise
+            self.conn.commit()
 
     def run_ids(self, state: State | None = None) -> list[str]:
-        if state is None:
-            self.cursor.execute(f"SELECT run_id FROM {self.table} ORDER BY id")
-        else:
-            self.cursor.execute(f"SELECT run_id FROM {self.table} WHERE state = ? ORDER BY id", (str(state),))
-        return [row[0] for row in self.cursor.fetchall()]
+        with self._lock:
+            if state is None:
+                self.cursor.execute(f"SELECT run_id FROM {self.table} ORDER BY id")
+            else:
+                self.cursor.execute(f"SELECT run_id FROM {self.table} WHERE state = ? ORDER BY id", (str(state),))
+            return [row[0] for row in self.cursor.fetchall()]
 
     def close(self) -> None:
         self.cursor.close()

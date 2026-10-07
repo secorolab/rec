@@ -1,7 +1,6 @@
 """Records the events of runs in a store."""
 
 import os
-import threading
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path, PurePath
@@ -20,8 +19,12 @@ from rec.record import (
     Repository,
     Software,
     Usage,
+    to_json,
 )
 from rec.stores import Store
+
+# PROV-O's agent classes (PROV-O 4.1).
+AGENT_TYPES = ("Agent", "SoftwareAgent", "Person", "Organization")
 
 
 class Observer:
@@ -32,16 +35,21 @@ class Observer:
 
     def __init__(self, store: Store):
         self.store = store
-        # A run's heartbeat thread and the run itself share the store's connection.
-        self._lock = threading.RLock()
 
     @contextmanager
     def _record(self, run_id: str):
-        with self._lock, self.store.edit(run_id) as record:
+        with self.store.edit(run_id) as record:
             yield record
+            # Checked for every store, so none keeps a record another could not.
+            try:
+                to_json(record)
+            except TypeError as error:
+                raise ValueError(f"run '{run_id}' holds a value JSON cannot keep -- {error}") from error
 
     def log_queued_run(self, run_id: str, queued_time: datetime):
         with self._record(run_id) as record:
+            if record.state is not State.NEW:
+                raise RuntimeError(f"run '{run_id}' is {record.state} -- only a new run can be queued")
             record.state, record.verdict, record.queued_time = State.QUEUED, Verdict.UNAVAILABLE, queued_time
 
     def log_started_run(self, run_id: str, started_time: datetime, trigger=None, starter=None, program=None):
@@ -70,8 +78,8 @@ class Observer:
 
     def log_cancelled_run(self, run_id: str, cancelled_time: datetime):
         with self._record(run_id) as record:
-            if record.state not in (State.NEW, State.QUEUED):
-                raise RuntimeError(f"run '{run_id}' is {record.state} -- only a run that has not started can be cancelled")
+            if record.state is not State.QUEUED:
+                raise RuntimeError(f"run '{run_id}' is {record.state} -- only a queued run can be cancelled")
             record.state, record.verdict, record.end_time = State.CANCELED, Verdict.UNAVAILABLE, cancelled_time
 
     def log_host_info(self, run_id: str, host_info: dict):
@@ -99,6 +107,8 @@ class Observer:
             record.metrics = [*kept, Metric(metric_name, step, value, time)]
 
     def add_agent(self, run_id: str, agent_id: str, agent_type: str, name: str | None = None):
+        if agent_type not in AGENT_TYPES:
+            raise ValueError(f"'{agent_type}' is not a PROV agent type -- use one of {list(AGENT_TYPES)}")
         with self._record(run_id) as record:
             record.agents.append(Agent(agent_id, agent_type, name))
 
