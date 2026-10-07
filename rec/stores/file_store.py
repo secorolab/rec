@@ -1,6 +1,8 @@
 """A store keeping each run as one file in a directory."""
 
+import fcntl
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 from rdflib import Graph
@@ -37,6 +39,17 @@ class FileStore:
         if self.fmt == "json":
             return from_json(path.read_text())
         return provenance.record(Graph().parse(path, format="json-ld"), run_id, self.base)
+
+    @contextmanager
+    def edit(self, run_id: str):
+        path = self.path(run_id)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        # The lock file stays: removing it would let a waiting process lock a file no longer in the directory.
+        with open(path.with_name(f"{run_id}.lock"), "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            record = self.load(run_id) or RunRecord(run_id)
+            yield record
+            self.save(record)
 
     def save(self, record: RunRecord) -> None:
         if self.fmt == "json":

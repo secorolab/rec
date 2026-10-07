@@ -29,8 +29,11 @@ about, and whoever created the observer closes it once its runs are over. What i
   `fmt="json"` keeps the record itself as `<run_id>.json`.
 - `MariaDBStore(db_name, table)` keeps one row per run: the record, with `state` and `verdict`
   columns to query runs by.
-- Any object with `load(run_id)`, `save(record)`, `run_ids(state=None)` and `close()` is a store
-  (`rec.stores.Store`).
+- Any object with `load(run_id)`, `edit(run_id)`, `run_ids(state=None)` and `close()` is a store
+  (`rec.stores.Store`). `edit` is a context manager yielding the run's record and keeping it when
+  the block ends; no other edit of that run, from any process, may interleave, so a cancellation
+  and a start cannot both succeed. `FileStore` locks with `flock` (POSIX), `MariaDBStore` with
+  `SELECT ... FOR UPDATE`.
 
 ### Creating a run
 
@@ -51,8 +54,10 @@ verdict is `unavailable` before that). A run that has not started is a `prov:Act
 started it is a `prov-ext:Execution` associated with rec, whose plan is the file defining the run.
 Its host is a `rec:Host`; sources, resources, repositories and dependencies are entities it
 `prov:used`; artefacts are what it generated, with checksum and size; scalars are `rec:Metric`
-quantities. A relative file path is recorded relative to the directory it was logged from. The
-run node is `https://secoro.uni-bremen.de/rec/run/<run_id>` unless another `base` is given.
+quantities; a list or mapping result is an `rdf:JSON` literal. A relative file path is recorded
+relative to the directory it was logged from. The run node is
+`https://secoro.uni-bremen.de/rec/run/<run_id>`, the id percent-encoded, unless another `base` is
+given.
 
 ## Connecting to MariaDB
 

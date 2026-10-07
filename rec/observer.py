@@ -18,7 +18,6 @@ from rec.record import (
     Host,
     Metric,
     Repository,
-    RunRecord,
     Software,
     Usage,
 )
@@ -33,16 +32,13 @@ class Observer:
 
     def __init__(self, store: Store):
         self.store = store
-        # A run's heartbeat thread and the run itself change the same record.
+        # A run's heartbeat thread and the run itself share the store's connection.
         self._lock = threading.RLock()
 
     @contextmanager
     def _record(self, run_id: str):
-        """The run's record as the store holds it, saved back once changed; an error saves nothing."""
-        with self._lock:
-            record = self.store.load(run_id) or RunRecord(run_id)
+        with self._lock, self.store.edit(run_id) as record:
             yield record
-            self.store.save(record)
 
     def log_queued_run(self, run_id: str, queued_time: datetime):
         with self._record(run_id) as record:
@@ -50,8 +46,8 @@ class Observer:
 
     def log_started_run(self, run_id: str, started_time: datetime, trigger=None, starter=None, program=None):
         with self._record(run_id) as record:
-            if record.state is State.CANCELED:
-                raise RuntimeError(f"run '{run_id}' was cancelled -- it cannot start")
+            if record.state not in (State.NEW, State.QUEUED):
+                raise RuntimeError(f"run '{run_id}' is {record.state} -- only a run that has not started can start")
             record.state, record.verdict, record.start_time = State.IN_PROGRESS, Verdict.UNAVAILABLE, started_time
             record.trigger, record.starter = trigger, starter
             record.program = file_ref(program) if program else None

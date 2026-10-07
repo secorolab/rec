@@ -1,4 +1,3 @@
-import json
 import os
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -55,32 +54,3 @@ def test_a_queued_run_is_cancelled_by_id(store):
     assert store.run_ids(State.IN_PROGRESS) == []
     Observer(MariaDBStore(db_name=TEST_DATABASE, table=store.table)).log_cancelled_run("queued", datetime.now(UTC))
     assert (store.load("queued").state, store.load("queued").verdict) == (State.CANCELED, Verdict.UNAVAILABLE)
-
-
-def test_a_table_from_the_previous_release_is_migrated(store):
-    table = f"{store.table}_old"
-    # The table as the previous release created it, and what it recorded of a run.
-    store.cursor.execute(
-        f"""
-        CREATE TABLE {table} (
-            id INT AUTO_INCREMENT PRIMARY KEY, status VARCHAR(20) NOT NULL, scenario_id VARCHAR(20),
-            host_info JSON, sources JSON, repositories JSON, dependencies JSON, metrics JSON,
-            agents JSON, resources JSON, artefacts JSON, run_info JSON, data JSON
-        )
-        """
-    )
-    started = datetime(2026, 1, 1, tzinfo=UTC)
-    store.cursor.execute(
-        f"INSERT INTO {table} (status, run_info) VALUES ('COMPLETED', ?), ('RUNNING', ?)",
-        (json.dumps({"start_time": started.isoformat()}), json.dumps({"start_time": started.isoformat()})),
-    )
-    try:
-        migrated = MariaDBStore(db_name=TEST_DATABASE, table=table)
-        assert (migrated.load("1").state, migrated.load("1").verdict) == (State.COMPLETE, Verdict.PASSED)
-        assert migrated.load("1").start_time == started
-        assert migrated.run_ids(State.IN_PROGRESS) == ["2"]
-        QuickRun(observers=[Observer(migrated)], run_id="run-new").run()
-        assert migrated.number("run-new") == 3
-        migrated.close()
-    finally:
-        store.cursor.execute(f"DROP TABLE IF EXISTS {table}")

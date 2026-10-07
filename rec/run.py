@@ -47,17 +47,12 @@ class Run:
     def __init__(
         self,
         observers: Sequence[Observer] = (),
-        ingredients: list = (),
         run_id: str | None = None,
-        scenario=None,
         pre_run_hooks: list = (),
         post_run_hooks: list = (),
-        **kwargs,
     ):
         self._id = run_id
         self.observers = list(observers)
-        self.ingredients = list(ingredients)
-        self.scenario = scenario
         self.start_time = None
         self.end_time = None
         self.state = None
@@ -195,8 +190,8 @@ class Run:
         :param starter: The activity that generated the trigger
         :return:
         """
-        if self.state is State.CANCELED:
-            raise RuntimeError("cannot start a cancelled run")
+        if self.state not in (None, State.QUEUED):
+            raise RuntimeError(f"cannot start a run that is {self.state}")
         self._emit_started(trigger, starter)
 
         try:

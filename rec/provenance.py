@@ -74,14 +74,17 @@ def graph(record: RunRecord, base: str = RUN_BASE) -> Graph:
     g = Graph()
     for prefix, namespace in PREFIXES.items():
         g.bind(prefix, namespace)
-    run = URIRef(base + record.run_id)
+    run = URIRef(base + quote(record.run_id, safe=""))
     g.add((run, RDF.type, PROV.Activity))
     g.add((run, OSLC_AUTO.state, STATES[record.state]))
     g.add((run, OSLC_AUTO.verdict, VERDICTS[record.verdict]))
     for value, predicate in ((record.queued_time, REC["queued-time"]), (record.heartbeat_time, REC["heartbeat-time"])):
         if value:
             g.add((run, predicate, Literal(value)))
-    if record.result is not None:
+    # A structured result as a JSON literal (JSON-LD 1.1, 4.2.2); a scalar keeps its XSD type.
+    if isinstance(record.result, (dict, list, tuple)):
+        g.add((run, REC.result, Literal(json.dumps(record.result), datatype=RDF.JSON)))
+    elif record.result is not None:
         g.add((run, REC.result, Literal(record.result)))
     if record.fail_trace:
         g.add((run, REC["fail-trace"], Literal(record.fail_trace, datatype=XSD.string)))
@@ -184,7 +187,7 @@ def graph(record: RunRecord, base: str = RUN_BASE) -> Graph:
 
 def record(g: Graph, run_id: str, base: str = RUN_BASE) -> RunRecord:
     """The record ``graph`` wrote; its lists come back sorted, a graph having no order."""
-    run = URIRef(base + run_id)
+    run = URIRef(base + quote(run_id, safe=""))
     association = g.value(run, PROV.qualifiedAssociation)
     plan, software = g.value(association, PROV.hadPlan), g.value(association, PROV.agent)
     start = g.value(run, PROV.qualifiedStart)
@@ -200,7 +203,7 @@ def record(g: Graph, run_id: str, base: str = RUN_BASE) -> RunRecord:
         start_time=_python(g.value(run, PROV.startedAtTime)),
         end_time=_python(g.value(run, PROV.endedAtTime)),
         heartbeat_time=_python(g.value(run, REC["heartbeat-time"])),
-        result=result.toPython() if result is not None else None,
+        result=json.loads(result) if result is not None and result.datatype == RDF.JSON else _python(result),
         fail_trace=_python(g.value(run, REC["fail-trace"])),
         program=_file_ref(g, plan) if plan else None,
         recorder=Software(
