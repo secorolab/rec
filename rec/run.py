@@ -195,18 +195,19 @@ class Run:
         self._emit_started(trigger, starter)
 
         try:
-            self._start_heartbeat()
-            self._execute_hooks(self.pre_run_hooks)
-            self.result = self.main()
+            # Stopped before any outcome is recorded, and on SystemExit too: the thread is not a daemon.
+            try:
+                self._start_heartbeat()
+                self._execute_hooks(self.pre_run_hooks)
+                self.result = self.main()
+            finally:
+                self._stop_heartbeat()
             logger.info("Result of run %s: %s", self.id, self.result)
-            self._stop_heartbeat()
             self._emit_completed()
         except KeyboardInterrupt as interrupt:
-            self._stop_heartbeat()
             self._emit_interrupted(interrupt)
             return self.result
         except Exception as error:
-            self._stop_heartbeat()
             self._emit_failed(error)
             return self.result
         # After completion: a post-run hook that raises is the caller's error, not the run's.

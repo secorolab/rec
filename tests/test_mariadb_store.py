@@ -40,9 +40,8 @@ def test_a_row_keeps_the_whole_record(store, tmp_path):
     for run in runs:
         run.beat_interval = 0
         run.run()
-    for number, run in enumerate(runs, start=1):
+    for run in runs:
         assert store.load(run.id) == files.load(run.id)
-        assert store.number(run.id) == number
     # The state and verdict columns are the record's, to query runs by.
     store.cursor.execute(f"SELECT state, verdict FROM {store.table} WHERE run_id = 'run-0'")
     assert store.cursor.fetchone() == ("complete", "passed")

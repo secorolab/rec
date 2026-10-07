@@ -17,7 +17,7 @@ class MariaDBStore:
         ``MARIADB_HOST`` and ``MARIADB_PORT`` from the environment or a ``.env`` file
 
         :param db_name: Name of the database
-        :param table: Name of the table, one row per run: ``id`` a short number to display,
+        :param table: Name of the table, one row per run: ``id`` in the order runs were added,
             ``run_id``, ``state`` and ``verdict`` to query by, and ``record``
         """
         load_dotenv()
@@ -74,12 +74,6 @@ class MariaDBStore:
         else:
             self.cursor.execute(f"SELECT run_id FROM {self.table} WHERE state = ? ORDER BY id", (str(state),))
         return [row[0] for row in self.cursor.fetchall()]
-
-    def number(self, run_id: str) -> int | None:
-        """The short number the table gave the run, None for a run it does not hold."""
-        self.cursor.execute(f"SELECT id FROM {self.table} WHERE run_id = ?", (run_id,))
-        row = self.cursor.fetchone()
-        return row[0] if row else None
 
     def close(self) -> None:
         self.cursor.close()
