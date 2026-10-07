@@ -8,6 +8,16 @@ from typing import Any
 from rec import State, Verdict
 
 TIMES = ("queued_time", "start_time", "end_time", "heartbeat_time")
+# The order a record keeps its lists in, the one a PROV graph, having none, reads them back in.
+ORDER = {
+    "agents": lambda agent: agent.id,
+    "sources": lambda ref: (ref.path, ref.root or ""),
+    "repositories": lambda row: row.name,
+    "dependencies": lambda row: row.name,
+    "resources": lambda row: (row.activity or "", row.file.path, row.file.root or ""),
+    "artefacts": lambda row: (row.activity or "", row.file.path, row.file.root or ""),
+    "metrics": lambda row: (row.name, row.step),
+}
 
 
 @dataclass
@@ -111,8 +121,8 @@ class RunRecord:
 
 
 def to_json(record: RunRecord) -> str:
-    """The record as JSON, its times in ISO 8601."""
-    return json.dumps(asdict(record), default=datetime.isoformat, indent=2)
+    """The record as JSON (RFC 8259, so no NaN or infinity), its times in ISO 8601."""
+    return json.dumps(asdict(record), default=datetime.isoformat, allow_nan=False, indent=2)
 
 
 def from_json(text: str) -> RunRecord:

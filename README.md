@@ -34,6 +34,12 @@ about, and whoever created the observer closes it once its runs are over. What i
   the block ends; no other edit of that run, from any process, may interleave, so a cancellation
   and a start cannot both succeed. `FileStore` locks with `flock` (POSIX), `MariaDBStore` with
   `SELECT ... FOR UPDATE`.
+- A run with several observers, each with its own store, queues, starts, cancels and ends holding
+  every store's record at once: a store that refuses leaves all of them unchanged. Saving is not
+  a two-phase commit, so a store failing to save can still leave them split. Two runs of the same
+  id whose observers list the same stores in different orders can wait on each other forever.
+- Every store keeps the same record: an observer refuses a change JSON or PROV would not give back
+  unchanged, such as a tuple, NaN, an empty string, or one file used twice by the same activity.
 
 ### Creating a run
 

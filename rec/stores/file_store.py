@@ -49,9 +49,9 @@ class FileStore:
             fcntl.flock(lock, fcntl.LOCK_EX)
             record = self.load(run_id) or RunRecord(run_id)
             yield record
-            self.save(record)
+            self._save(record)
 
-    def save(self, record: RunRecord) -> None:
+    def _save(self, record: RunRecord) -> None:
         if self.fmt == "json":
             text = to_json(record)
         else:

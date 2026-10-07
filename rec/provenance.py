@@ -17,6 +17,7 @@ from rdflib.namespace import DCAT, PROV, RDF, RDFS, SDO
 
 from rec import State, Verdict
 from rec.record import (
+    ORDER,
     Agent,
     Dependency,
     FileRef,
@@ -111,7 +112,7 @@ def graph(record: RunRecord, base: str = RUN_BASE) -> Graph:
     for usage in record.resources:
         entity = _file(g, run, usage.file)
         activity = URIRef(usage.activity or run)
-        node = URIRef(f"{run}/usage/{quote(str(activity), safe='')}/{quote(usage.file.path, safe='')}")
+        node = URIRef(f"{entity}/usage/{quote(str(activity), safe='')}")
         g.add((node, RDF.type, PROV.Usage))
         g.add((node, PROV.entity, entity))
         if usage.time:
@@ -162,7 +163,7 @@ def graph(record: RunRecord, base: str = RUN_BASE) -> Graph:
     for generation in record.artefacts:
         entity = _file(g, run, generation.file)
         activity = URIRef(generation.activity or run)
-        node = URIRef(f"{run}/generation/{quote(str(activity), safe='')}/{quote(generation.file.path, safe='')}")
+        node = URIRef(f"{entity}/generation/{quote(str(activity), safe='')}")
         g.add((activity, RDF.type, PROV.Activity))
         g.add((entity, PROV.wasGeneratedBy, activity))
         g.add((entity, PROV.qualifiedGeneration, node))
@@ -195,6 +196,8 @@ def record(g: Graph, run_id: str, base: str = RUN_BASE) -> RunRecord:
     result = g.value(run, REC.result)
     run_usages = {g.value(usage, PROV.entity) for usage in g.objects(run, PROV.qualifiedUsage)}
     kinds = {SDO.SoftwareSourceCode, SDO.SoftwareApplication}
+    # Only what links to this run, or what graph() named under its IRI: the graph may hold other runs.
+    own = f"{run}/"
     return RunRecord(
         run_id=run_id,
         state=next(state for state, iri in STATES.items() if iri == g.value(run, OSLC_AUTO.state)),
@@ -227,7 +230,7 @@ def record(g: Graph, run_id: str, base: str = RUN_BASE) -> RunRecord:
                 for agent in g.objects(run, PROV.wasAssociatedWith)
                 if agent != software
             ),
-            key=lambda agent: agent.id,
+            key=ORDER["agents"],
         ),
         sources=sorted(
             (
@@ -235,21 +238,23 @@ def record(g: Graph, run_id: str, base: str = RUN_BASE) -> RunRecord:
                 for entity in g.objects(run, PROV.used)
                 if entity != plan and entity not in run_usages and not set(g.objects(entity, RDF.type)) & kinds
             ),
-            key=lambda ref: ref.path,
+            key=ORDER["sources"],
         ),
         repositories=sorted(
             (
                 Repository(str(g.value(node, RDFS.label)), _python(g.value(node, SDO.codeRepository)), _python(g.value(node, SDO.identifier)))
-                for node in g.subjects(RDF.type, SDO.SoftwareSourceCode)
+                for node in g.objects(run, PROV.used)
+                if (node, RDF.type, SDO.SoftwareSourceCode) in g
             ),
-            key=lambda row: row.name,
+            key=ORDER["repositories"],
         ),
         dependencies=sorted(
             (
                 Dependency(str(g.value(node, RDFS.label)), _python(g.value(node, SDO.softwareVersion)))
-                for node in g.subjects(RDF.type, SDO.SoftwareApplication)
+                for node in g.objects(run, PROV.used)
+                if (node, RDF.type, SDO.SoftwareApplication) in g
             ),
-            key=lambda row: row.name,
+            key=ORDER["dependencies"],
         ),
         resources=sorted(
             (
@@ -259,8 +264,9 @@ def record(g: Graph, run_id: str, base: str = RUN_BASE) -> RunRecord:
                     _python(g.value(usage, PROV.atTime)),
                 )
                 for activity, usage in g.subject_objects(PROV.qualifiedUsage)
+                if usage.startswith(own)
             ),
-            key=lambda row: (row.activity or "", row.file.path),
+            key=ORDER["resources"],
         ),
         artefacts=sorted(
             (
@@ -270,8 +276,9 @@ def record(g: Graph, run_id: str, base: str = RUN_BASE) -> RunRecord:
                     _python(g.value(node, PROV.atTime)),
                 )
                 for entity, node in g.subject_objects(PROV.qualifiedGeneration)
+                if node.startswith(own)
             ),
-            key=lambda row: (row.activity or "", row.file.path),
+            key=ORDER["artefacts"],
         ),
         metrics=sorted(
             (
@@ -281,9 +288,10 @@ def record(g: Graph, run_id: str, base: str = RUN_BASE) -> RunRecord:
                     g.value(node, QUDT.value).toPython(),
                     _python(g.value(node, PROV.generatedAtTime)),
                 )
-                for node in g.subjects(RDF.type, REC.Metric)
+                for node in g.subjects(PROV.wasGeneratedBy, run)
+                if (node, RDF.type, REC.Metric) in g
             ),
-            key=lambda row: (row.name, row.step),
+            key=ORDER["metrics"],
         ),
     )
 
@@ -294,7 +302,11 @@ def document(g: Graph) -> dict:
 
 
 def _file(g: Graph, run: URIRef, ref: FileRef) -> URIRef:
-    entity = URIRef(f"{run}/file/{quote(ref.path, safe='')}")
+    # The root is part of the name: one relative path logged from two directories is two files.
+    if ref.root:
+        entity = URIRef(f"{run}/file/{quote(ref.root, safe='')}/{quote(ref.path, safe='')}")
+    else:
+        entity = URIRef(f"{run}/file/{quote(ref.path, safe='')}")
     if ref.root:
         location = URIRef(f"{entity}/location")
         add_relative_location(g, location, ref.path, ref.root)

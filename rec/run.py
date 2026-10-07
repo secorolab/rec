@@ -6,6 +6,7 @@ import socket
 import threading
 import traceback
 from collections.abc import Sequence
+from contextlib import ExitStack, contextmanager
 from uuid import uuid4
 
 from rec import State, Verdict
@@ -22,7 +23,8 @@ class IntervalTimer(threading.Thread):
         return stop_event, timer_thread
 
     def __init__(self, event, func, interval=10.0):
-        super().__init__()
+        # A daemon: a beat stuck on a store must not keep the process alive once the run is over.
+        super().__init__(daemon=True)
         self.stopped = event
         self.func = func
         self.interval = interval
@@ -53,6 +55,9 @@ class Run:
     ):
         self._id = run_id
         self.observers = list(observers)
+        # A start holds every store's record at once; a store held twice would wait on itself.
+        if len({id(observer.store) for observer in self.observers}) < len(self.observers):
+            raise ValueError("'observers' share a store -- give each its own store")
         self.start_time = None
         self.end_time = None
         self.state = None
@@ -71,9 +76,13 @@ class Run:
             self._id = str(uuid4())
         return self._id
 
-    def _stop_time(self):
-        self.end_time = datetime.datetime.now(datetime.UTC)
-        return self.end_time
+    @contextmanager
+    def _held(self):
+        """Every store's record open at once: one refusal leaves them all unchanged; a failed save can still split them."""
+        with ExitStack() as held:
+            for observer in self.observers:
+                held.enter_context(observer._hold(self.id))
+            yield
 
     def _start_heartbeat(self):
         if self.beat_interval > 0:
@@ -99,15 +108,17 @@ class Run:
     def _emit_cancelled(self):
         cancelled_time = datetime.datetime.now(datetime.UTC)
         # The stores go first, as on start: one of them may refuse.
-        for observer in self.observers:
-            observer.log_cancelled_run(self.id, cancelled_time)
+        with self._held():
+            for observer in self.observers:
+                observer.log_cancelled_run(self.id, cancelled_time)
         self.state, self.verdict, self.end_time = State.CANCELED, Verdict.UNAVAILABLE, cancelled_time
         logger.info("Cancelled run %s", self.id)
 
     def _emit_queued(self):
         queued_time = datetime.datetime.now(datetime.UTC)
-        for observer in self.observers:
-            observer.log_queued_run(self.id, queued_time)
+        with self._held():
+            for observer in self.observers:
+                observer.log_queued_run(self.id, queued_time)
         self.state, self.verdict = State.QUEUED, Verdict.UNAVAILABLE
         logger.info("Queued run %s", self.id)
 
@@ -127,38 +138,36 @@ class Run:
             # A class typed into an interpreter has no file to name.
             program = None
         # The stores go first: one of them may hold a cancellation this object never saw.
-        for observer in self.observers:
-            observer.log_started_run(self.id, start_time, trigger=trigger, starter=starter, program=program)
+        with self._held():
+            for observer in self.observers:
+                observer.log_started_run(self.id, start_time, trigger=trigger, starter=starter, program=program)
         self.state, self.verdict = State.IN_PROGRESS, Verdict.UNAVAILABLE
         self.start_time = start_time
         self.log_host_info(host_info())
 
     def _emit_completed(self):
-        self.state, self.verdict = State.COMPLETE, Verdict.PASSED
-        completed_time = self._stop_time()
+        completed_time = datetime.datetime.now(datetime.UTC)
+        with self._held():
+            for observer in self.observers:
+                observer.log_completed_run(self.id, completed_time, self.result)
+        self.state, self.verdict, self.end_time = State.COMPLETE, Verdict.PASSED, completed_time
         logger.info("Completed run %s after %s", self.id, completed_time - self.start_time)
 
-        # Update info on observers
-        for observer in self.observers:
-            observer.log_completed_run(self.id, completed_time, self.result)
-
     def _emit_interrupted(self, error=None):
-        self.state, self.verdict = State.COMPLETE, Verdict.ERROR
-        interrupted_time = self._stop_time()
+        interrupted_time = datetime.datetime.now(datetime.UTC)
+        with self._held():
+            for observer in self.observers:
+                observer.log_interrupted_run(self.id, interrupted_time, _fail_trace(error))
+        self.state, self.verdict, self.end_time = State.COMPLETE, Verdict.ERROR, interrupted_time
         logger.warning("Interrupted run %s after %s", self.id, interrupted_time - self.start_time)
 
-        # Update info on observers
-        for observer in self.observers:
-            observer.log_interrupted_run(self.id, interrupted_time, _fail_trace(error))
-
     def _emit_failed(self, error=None):
-        self.state, self.verdict = State.COMPLETE, Verdict.FAILED
-        failed_time = self._stop_time()
+        failed_time = datetime.datetime.now(datetime.UTC)
+        with self._held():
+            for observer in self.observers:
+                observer.log_failed_run(self.id, failed_time, _fail_trace(error))
+        self.state, self.verdict, self.end_time = State.COMPLETE, Verdict.FAILED, failed_time
         logger.error("Failed run %s after %s", self.id, failed_time - self.start_time, exc_info=error)
-
-        # Update info on observers
-        for observer in self.observers:
-            observer.log_failed_run(self.id, failed_time, _fail_trace(error))
 
     def _execute_hooks(self, hooks):
         for hook in hooks:
