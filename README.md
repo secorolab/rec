@@ -11,17 +11,26 @@ In your terminal, go to where you have cloned this repository and install it in 
 pip install -e .
 ```
 
-## Examples
-
-The current skeleton of the code allows you to run two examples: The `MariaDBObserver` and a `Run`.
-
-### Observers
-
-An Observer is an interface to a type of data storage. For now, we have added a `MariaDBObserver` with some basic functionality. To test it you can run the following in your terminal:
+Add the MariaDB backend when runs are stored in a database:
 
 ```shell
-python rec/observers/mariadb_observer.py
+pip install -e ".[mariadb]"
 ```
+
+## Examples
+
+### Observers and stores
+
+An `Observer` records the events of any number of runs in a store; every call names the run it is
+about, and whoever created the observer closes it once its runs are over. What it records is a
+`rec.record.RunRecord`, the same whatever the store:
+
+- `FileStore(directory, fmt="rdf")` keeps each run as its PROV document, `<run_id>.ld.json`;
+  `fmt="json"` keeps the record itself as `<run_id>.json`.
+- `MariaDBStore(db_name, table)` keeps one row per run: the record, with `state` and `verdict`
+  columns to query runs by.
+- Any object with `load(run_id)`, `save(record)`, `run_ids(state=None)` and `close()` is a store
+  (`rec.stores.Store`).
 
 ### Creating a run
 
@@ -31,6 +40,19 @@ The [example](examples/decentral_run.py) shows how to create a run object, attac
 python examples/decentral_run.py
 ```
 
+### What a run records
+
+`rec.provenance.graph(record)` is the run in PROV on the
+[rec and prov-extension vocabularies](https://secorolab.github.io/metamodels/), built with the
+rdf-utils PROV helpers, and `rec.provenance.record(graph, run_id)` reads it back. Its lifecycle is
+an OSLC Automation state and verdict (`rec.State` and `rec.Verdict`: a run is `queued`,
+`in-progress`, `canceled` or `complete`, and once complete `passed`, `failed` or `error`; a
+verdict is `unavailable` before that). A run that has not started is a `prov:Activity`; once
+started it is a `prov-ext:Execution` associated with rec, whose plan is the file defining the run.
+Its host is a `rec:Host`; sources, resources, repositories and dependencies are entities it
+`prov:used`; artefacts are what it generated, with checksum and size; scalars are `rec:Metric`
+quantities. A relative file path is recorded relative to the directory it was logged from. The
+run node is `https://secoro.uni-bremen.de/rec/run/<run_id>` unless another `base` is given.
 
 ## Connecting to MariaDB
 
@@ -42,6 +64,18 @@ MARIADB_PASSWORD="pass12345"
 MARIADB_HOST="localhost"
 MARIADB_PORT=3306
 ```
+
+## Tests
+
+```shell
+pip install -e ".[dev]"
+pytest
+```
+
+The conformance test validates a recorded run against the shapes in a
+[metamodels](https://github.com/secorolab/metamodels) checkout beside this repository or at
+`REC_METAMODELS_DIR`. MariaDB tests need the `mariadb` extra and a disposable database named by
+`REC_TEST_MARIADB_DATABASE`.
 
 ## Acknowledgments
 
