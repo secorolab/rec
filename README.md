@@ -53,11 +53,11 @@ python examples/decentral_run.py
 
 `rec.provenance.graph(record)` is the run in PROV on the
 [rec and prov-extension vocabularies](https://secorolab.github.io/metamodels/), built with the
-rdf-utils PROV helpers, and `rec.provenance.record(graph, run_id)` reads it back. Its lifecycle is
-an OSLC Automation state and verdict (`rec.State` and `rec.Verdict`: a run is `queued`,
-`in-progress`, `canceled` or `complete`, and once complete `passed`, `failed` or `error`; a
-verdict is `unavailable` before that). A run that has not started is a `prov:Activity`; once
-started it is a `prov-ext:Execution` associated with rec, whose plan is the file defining the run.
+rdf-utils PROV helpers, and `rec.provenance.record(graph, run_id)` reads it back. A run is a
+`prov-ext:Execution` and an `oslc_auto:AutomationResult`, its lifecycle an OSLC Automation state and
+verdict (`rec.State` and `rec.Verdict`: a run is `queued`, `in-progress`, `canceled` or `complete`,
+and once complete `passed`, `failed` or `error`; a verdict is `unavailable` before that). Once
+started it has a start time and is associated with rec, whose plan is the file defining the run.
 Its host is a `rec:Host`; sources, resources, repositories and dependencies are entities it
 `prov:used`; artefacts are what it generated, with checksum and size; scalars are `rec:Metric`
 quantities; a list or mapping result is an `rdf:JSON` literal. A relative file path is recorded

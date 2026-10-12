@@ -11,7 +11,7 @@ from rdflib.namespace import PROV, RDF, RDFS, SDO
 
 from rec import State, Verdict, provenance
 from rec.observer import Observer
-from rec.provenance import PROV_EXT, REC
+from rec.provenance import OSLC_AUTO, PROV_EXT, REC
 from rec.run import Run
 from rec.stores.file_store import FileStore
 
@@ -97,8 +97,37 @@ def test_a_queued_run_has_not_executed_yet(store):
     ok, _, report = validate(g, shacl_graph=SHAPES, inference="rdfs")
     assert ok, report
     node = URIRef(provenance.RUN_BASE + "run-q")
-    assert (node, RDF.type, PROV.Activity) in g and (node, RDF.type, PROV_EXT.Execution) not in g
+    assert {PROV_EXT.Execution, OSLC_AUTO.AutomationResult} <= set(g.objects(node, RDF.type))
+    assert g.value(node, PROV.startedAtTime) is None and g.value(node, PROV.wasAssociatedWith) is None
     assert g.value(node, PROV.used) is None and g.value(node, REC["queued-time"]) is not None
+
+
+# Each starts from a completed run and breaks one rule of the run's shape.
+@pytest.mark.parametrize(
+    ("removed", "added"),
+    [
+        ([(OSLC_AUTO.verdict, None)], []),
+        (
+            [(OSLC_AUTO.state, None), (OSLC_AUTO.verdict, None)],
+            [(OSLC_AUTO.state, OSLC_AUTO.queued), (OSLC_AUTO.verdict, OSLC_AUTO.unavailable)],
+        ),
+        ([(RDF.type, PROV_EXT.Execution)], []),
+        ([(RDF.type, OSLC_AUTO.AutomationResult)], []),
+    ],
+    ids=["without a verdict", "queued with a start time", "not an execution", "not an automation result"],
+)
+def test_the_shapes_refuse_a_run_that_contradicts_its_state(store, tmp_path, monkeypatch, removed, added):
+    monkeypatch.chdir(tmp_path)
+    run = CalibrationRun(observers=[Observer(store)], run_id="run-x")
+    run.beat_interval = 0
+    run.run()
+    g = provenance.graph(store.load("run-x"))
+    node = URIRef(provenance.RUN_BASE + "run-x")
+    for predicate, value in removed:
+        g.remove((node, predicate, value))
+    for predicate, value in added:
+        g.add((node, predicate, value))
+    assert not validate(g, shacl_graph=SHAPES, inference="rdfs")[0]
 
 
 @pytest.mark.parametrize(
@@ -135,6 +164,10 @@ def test_only_a_queued_run_is_cancelled(store):
     with pytest.raises(RuntimeError, match="is canceled"):
         queued.run()
     assert (store.load("run-q").state, store.load("run-q").verdict) == (State.CANCELED, Verdict.UNAVAILABLE)
+    g = provenance.graph(store.load("run-q"))
+    ok, _, report = validate(g, shacl_graph=SHAPES, inference="rdfs")
+    assert ok, report
+    assert g.value(URIRef(provenance.RUN_BASE + "run-q"), PROV.startedAtTime) is None
 
     done = CalibrationRun(observers=[Observer(store)], run_id="run-d")
     done.beat_interval = 0

@@ -70,13 +70,14 @@ PREFIXES = {
 
 
 def graph(record: RunRecord, base: str = RUN_BASE) -> Graph:
-    """The run as a `prov:Activity` with its OSLC state; once started, a `prov-ext:Execution`
-    of its program by the software that recorded it."""
+    """The run as a `prov-ext:Execution` and an `oslc_auto:AutomationResult` with its state and verdict;
+    once started, of its program by the software that recorded it."""
     g = Graph()
     for prefix, namespace in PREFIXES.items():
         g.bind(prefix, namespace)
     run = URIRef(base + quote(record.run_id, safe=""))
-    g.add((run, RDF.type, PROV.Activity))
+    g.add((run, RDF.type, PROV_EXT.Execution))
+    g.add((run, RDF.type, OSLC_AUTO.AutomationResult))
     g.add((run, OSLC_AUTO.state, STATES[record.state]))
     g.add((run, OSLC_AUTO.verdict, VERDICTS[record.verdict]))
     for value, predicate in ((record.queued_time, REC["queued-time"]), (record.heartbeat_time, REC["heartbeat-time"])):
