@@ -8,13 +8,14 @@ from pathlib import Path
 from rdflib import Graph
 
 from rec import State, provenance
-from rec.record import RunRecord, from_json, to_json
+from rec.record import RUN_ID, RunRecord, from_json, to_json
+from rec.stores import Store
 
 # The file each format keeps a run in: its record, or its PROV document.
 SUFFIXES = {"json": ".json", "rdf": ".ld.json"}
 
 
-class FileStore:
+class FileStore(Store):
     def __init__(self, directory, fmt: str = "rdf", base: str = provenance.RUN_BASE):
         """
         :param directory: Where the files go; created on first write
@@ -28,8 +29,13 @@ class FileStore:
         self.base = base
 
     def path(self, run_id: str) -> Path:
-        if not run_id or run_id in (".", "..") or Path(run_id).name != run_id:
-            raise ValueError(f"'{run_id}' is not a file name -- a run id names its file in the directory")
+        """Return the run's file, ``<run_id>.ld.json`` or ``<run_id>.json`` in the directory.
+
+        :raises ValueError: ``run_id`` is not a run id (``rec.record.RUN_ID``)
+        """
+        # A load comes before any record, and an id like '../x' must not read outside the directory.
+        if not RUN_ID.fullmatch(run_id):
+            raise ValueError(f"'{run_id}' is not a run id -- use letters, digits, '-', '.', '_' or '~', not '.' or '..'")
         return self.directory / f"{run_id}{SUFFIXES[self.fmt]}"
 
     def load(self, run_id: str) -> RunRecord | None:
@@ -42,6 +48,10 @@ class FileStore:
 
     @contextmanager
     def edit(self, run_id: str):
+        """Yield the run's ``RunRecord`` under an ``flock`` on ``<run_id>.lock``, and save it when the block exits.
+
+        The file is replaced whole, through a temporary file; if the block raises, it is left as it was.
+        """
         path = self.path(run_id)
         self.directory.mkdir(parents=True, exist_ok=True)
         # The lock file stays: removing it would let a waiting process lock a file no longer in the directory.

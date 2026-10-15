@@ -1,10 +1,12 @@
 """A run record as PROV on the prov-extension and rec vocabularies, and back."""
 
 import json
+from typing import Any
 from urllib.parse import quote, unquote
 
 from rdf_utils.models.prov import (
     _path_from_file_url,
+    add_activity,
     add_agent,
     add_entity,
     add_file_entity,
@@ -13,11 +15,12 @@ from rdf_utils.models.prov import (
     load_pkg_prov,
 )
 from rdflib import XSD, Graph, Literal, Namespace, URIRef
-from rdflib.namespace import DCAT, PROV, RDF, RDFS, SDO
+from rdflib.namespace import DCAT, DCTERMS, PROV, RDF, RDFS, SDO
+from rdflib.term import Node
 
 from rec import State, Verdict
 from rec.record import (
-    ORDER,
+    Activity,
     Agent,
     Dependency,
     FileRef,
@@ -62,6 +65,7 @@ PREFIXES = {
     "oslc_auto": OSLC_AUTO,
     "spdx": SPDX,
     "dcat": DCAT,
+    "dcterms": DCTERMS,
     "schema": SDO,
     "qudt": QUDT,
     "rdfs": RDFS,
@@ -75,7 +79,7 @@ def graph(record: RunRecord, base: str = RUN_BASE) -> Graph:
     g = Graph()
     for prefix, namespace in PREFIXES.items():
         g.bind(prefix, namespace)
-    run = URIRef(base + quote(record.run_id, safe=""))
+    run = URIRef(base + record.run_id)
     g.add((run, RDF.type, PROV_EXT.Execution))
     g.add((run, RDF.type, OSLC_AUTO.AutomationResult))
     g.add((run, OSLC_AUTO.state, STATES[record.state]))
@@ -83,15 +87,12 @@ def graph(record: RunRecord, base: str = RUN_BASE) -> Graph:
     for value, predicate in ((record.queued_time, REC["queued-time"]), (record.heartbeat_time, REC["heartbeat-time"])):
         if value:
             g.add((run, predicate, Literal(value)))
-    # A structured result as a JSON literal (JSON-LD 1.1, 4.2.2); a scalar keeps its XSD type.
-    if isinstance(record.result, (dict, list, tuple)):
-        g.add((run, REC.result, Literal(json.dumps(record.result), datatype=RDF.JSON)))
-    elif record.result is not None:
-        g.add((run, REC.result, Literal(record.result)))
     if record.fail_trace:
         g.add((run, REC["fail-trace"], Literal(record.fail_trace, datatype=XSD.string)))
+    if record.result is not None:
+        g.add((run, REC.result, Literal(record.result, datatype=XSD.string)))
 
-    used = [_file(g, run, ref) for ref in record.sources]
+    used = []
     for row in record.repositories:
         repository = URIRef(f"{run}/repository/{quote(row.name, safe='')}")
         add_entity(g, repository)
@@ -122,7 +123,7 @@ def graph(record: RunRecord, base: str = RUN_BASE) -> Graph:
         g.add((activity, PROV.used, entity))
         g.add((activity, PROV.qualifiedUsage, node))
 
-    if record.start_time:
+    if record.start_time and record.recorder:
         software = URIRef(f"{run}/software")
         load_pkg_prov(g, software, record.recorder.name, record.recorder.version, record.recorder.commit, record.recorder.repository)
         association = URIRef(f"{run}/association")
@@ -143,15 +144,19 @@ def graph(record: RunRecord, base: str = RUN_BASE) -> Graph:
     for agent in record.agents:
         add_agent(g, URIRef(agent.id), (PROV[agent.type],), agent.name)
         g.add((run, PROV.wasAssociatedWith, URIRef(agent.id)))
+    # PROV has no part-whole relation between activities.
+    for activity in record.activities:
+        add_activity(g, URIRef(activity.id), (PROV_EXT[activity.kind],), (), URIRef(activity.agent), activity.start_time, activity.end_time)
+        g.add((URIRef(activity.id), DCTERMS.isPartOf, run))
 
-    if record.trigger:
+    if record.trigger_entity:
         start = URIRef(f"{run}/start")
-        g.add((run, PROV.wasStartedBy, URIRef(record.trigger)))
+        g.add((run, PROV.wasStartedBy, URIRef(record.trigger_entity)))
         g.add((run, PROV.qualifiedStart, start))
         g.add((start, RDF.type, PROV.Start))
-        g.add((start, PROV.entity, URIRef(record.trigger)))
-        if record.starter:
-            g.add((start, PROV.hadActivity, URIRef(record.starter)))
+        g.add((start, PROV.entity, URIRef(record.trigger_entity)))
+        if record.trigger_generator:
+            g.add((start, PROV.hadActivity, URIRef(record.trigger_generator)))
     if record.host:
         host = URIRef(f"{run}/host")
         g.add((host, RDF.type, REC.Host))
@@ -188,15 +193,12 @@ def graph(record: RunRecord, base: str = RUN_BASE) -> Graph:
 
 
 def record(g: Graph, run_id: str, base: str = RUN_BASE) -> RunRecord:
-    """The record ``graph`` wrote; its lists come back sorted, a graph having no order."""
-    run = URIRef(base + quote(run_id, safe=""))
+    """The record ``graph`` wrote; its lists come back in no particular order, a graph having none."""
+    run = URIRef(base + run_id)
     association = g.value(run, PROV.qualifiedAssociation)
     plan, software = g.value(association, PROV.hadPlan), g.value(association, PROV.agent)
     start = g.value(run, PROV.qualifiedStart)
     host = g.value(run, PROV.atLocation)
-    result = g.value(run, REC.result)
-    run_usages = {g.value(usage, PROV.entity) for usage in g.objects(run, PROV.qualifiedUsage)}
-    kinds = {SDO.SoftwareSourceCode, SDO.SoftwareApplication}
     # Only what links to this run, or what graph() named under its IRI: the graph may hold other runs.
     own = f"{run}/"
     return RunRecord(
@@ -207,8 +209,8 @@ def record(g: Graph, run_id: str, base: str = RUN_BASE) -> RunRecord:
         start_time=_python(g.value(run, PROV.startedAtTime)),
         end_time=_python(g.value(run, PROV.endedAtTime)),
         heartbeat_time=_python(g.value(run, REC["heartbeat-time"])),
-        result=json.loads(result) if result is not None and result.datatype == RDF.JSON else _python(result),
         fail_trace=_python(g.value(run, REC["fail-trace"])),
+        result=_python(g.value(run, REC.result)),
         program=_file_ref(g, plan) if plan else None,
         recorder=Software(
             str(g.value(software, SDO.name)),
@@ -218,82 +220,67 @@ def record(g: Graph, run_id: str, base: str = RUN_BASE) -> RunRecord:
         )
         if software
         else None,
-        trigger=_python(g.value(start, PROV.entity)),
-        starter=_python(g.value(start, PROV.hadActivity)),
+        trigger_entity=_python(g.value(start, PROV.entity)),
+        trigger_generator=_python(g.value(start, PROV.hadActivity)),
         host=Host(**{key: _python(g.value(host, predicate)) for key, predicate in HOST_TERMS.items()}) if host else None,
-        agents=sorted(
-            (
-                Agent(
-                    str(agent),
-                    next((str(kind).removeprefix(str(PROV)) for kind in g.objects(agent, RDF.type) if kind != PROV.Agent), "Agent"),
-                    _python(g.value(agent, SDO.name)),
-                )
-                for agent in g.objects(run, PROV.wasAssociatedWith)
-                if agent != software
-            ),
-            key=ORDER["agents"],
-        ),
-        sources=sorted(
-            (
-                _file_ref(g, entity)
-                for entity in g.objects(run, PROV.used)
-                if entity != plan and entity not in run_usages and not set(g.objects(entity, RDF.type)) & kinds
-            ),
-            key=ORDER["sources"],
-        ),
-        repositories=sorted(
-            (
-                Repository(str(g.value(node, RDFS.label)), _python(g.value(node, SDO.codeRepository)), _python(g.value(node, SDO.identifier)))
-                for node in g.objects(run, PROV.used)
-                if (node, RDF.type, SDO.SoftwareSourceCode) in g
-            ),
-            key=ORDER["repositories"],
-        ),
-        dependencies=sorted(
-            (
-                Dependency(str(g.value(node, RDFS.label)), _python(g.value(node, SDO.softwareVersion)))
-                for node in g.objects(run, PROV.used)
-                if (node, RDF.type, SDO.SoftwareApplication) in g
-            ),
-            key=ORDER["dependencies"],
-        ),
-        resources=sorted(
-            (
-                Usage(
-                    _file_ref(g, g.value(usage, PROV.entity)),
-                    None if activity == run else str(activity),
-                    _python(g.value(usage, PROV.atTime)),
-                )
-                for activity, usage in g.subject_objects(PROV.qualifiedUsage)
-                if usage.startswith(own)
-            ),
-            key=ORDER["resources"],
-        ),
-        artefacts=sorted(
-            (
-                Generation(
-                    _file_ref(g, entity),
-                    None if g.value(node, PROV.activity) == run else str(g.value(node, PROV.activity)),
-                    _python(g.value(node, PROV.atTime)),
-                )
-                for entity, node in g.subject_objects(PROV.qualifiedGeneration)
-                if node.startswith(own)
-            ),
-            key=ORDER["artefacts"],
-        ),
-        metrics=sorted(
-            (
-                Metric(
-                    str(g.value(node, RDFS.label)),
-                    g.value(node, REC.step).toPython(),
-                    g.value(node, QUDT.value).toPython(),
-                    _python(g.value(node, PROV.generatedAtTime)),
-                )
-                for node in g.subjects(PROV.wasGeneratedBy, run)
-                if (node, RDF.type, REC.Metric) in g
-            ),
-            key=ORDER["metrics"],
-        ),
+        agents=[
+            Agent(
+                str(agent),
+                next((str(kind).removeprefix(str(PROV)) for kind in g.objects(agent, RDF.type) if kind != PROV.Agent), "Agent"),
+                _python(g.value(agent, SDO.name)),
+            )
+            for agent in g.objects(run, PROV.wasAssociatedWith)
+            if agent != software
+        ],
+        activities=[
+            Activity(
+                str(activity),
+                next(str(kind).removeprefix(str(PROV_EXT)) for kind in g.objects(activity, RDF.type) if str(kind).startswith(str(PROV_EXT))),
+                str(g.value(activity, PROV.wasAssociatedWith)),
+                _python(g.value(activity, PROV.startedAtTime)),
+                _python(g.value(activity, PROV.endedAtTime)),
+            )
+            for activity in g.subjects(DCTERMS.isPartOf, run)
+        ],
+        repositories=[
+            Repository(str(g.value(node, RDFS.label)), _python(g.value(node, SDO.codeRepository)), _python(g.value(node, SDO.identifier)))
+            for node in g.objects(run, PROV.used)
+            if (node, RDF.type, SDO.SoftwareSourceCode) in g
+        ],
+        dependencies=[
+            Dependency(str(g.value(node, RDFS.label)), _python(g.value(node, SDO.softwareVersion)))
+            for node in g.objects(run, PROV.used)
+            if (node, RDF.type, SDO.SoftwareApplication) in g
+        ],
+        resources=[
+            Usage(
+                _file_ref(g, entity),
+                None if activity == run else str(activity),
+                _python(g.value(usage, PROV.atTime)),
+            )
+            for activity, usage in g.subject_objects(PROV.qualifiedUsage)
+            if str(usage).startswith(own)
+            for entity in g.objects(usage, PROV.entity)
+        ],
+        artefacts=[
+            Generation(
+                _file_ref(g, entity),
+                None if g.value(node, PROV.activity) == run else str(g.value(node, PROV.activity)),
+                _python(g.value(node, PROV.atTime)),
+            )
+            for entity, node in g.subject_objects(PROV.qualifiedGeneration)
+            if str(node).startswith(own)
+        ],
+        metrics=[
+            Metric(
+                str(g.value(node, RDFS.label)),
+                _python(g.value(node, REC.step)),
+                _python(g.value(node, QUDT.value)),
+                _python(g.value(node, PROV.generatedAtTime)),
+            )
+            for node in g.subjects(PROV.wasGeneratedBy, run)
+            if (node, RDF.type, REC.Metric) in g
+        ],
     )
 
 
@@ -327,14 +314,13 @@ def _file(g: Graph, run: URIRef, ref: FileRef) -> URIRef:
     return entity
 
 
-def _file_ref(g: Graph, entity: URIRef) -> FileRef:
+def _file_ref(g: Graph, entity: Node) -> FileRef:
     location = g.value(entity, PROV.atLocation)
     rel_path = g.value(location, PROV_EXT["rel-path"])
     if rel_path is not None:
         path, root = unquote(str(rel_path)), str(_path_from_file_url(str(g.value(location, PROV.atLocation))))
     else:
         path, root = str(_path_from_file_url(str(location))) if str(location).startswith("file:") else str(location), None
-    size = g.value(entity, DCAT.byteSize)
     # An xsd:hexBinary's Python value is bytes; the record holds the hex text.
     checksum = g.value(g.value(entity, SPDX.checksum), SPDX.checksumValue)
     return FileRef(
@@ -342,11 +328,11 @@ def _file_ref(g: Graph, entity: URIRef) -> FileRef:
         root,
         _python(g.value(entity, RDFS.label)),
         str(checksum) if checksum is not None else None,
-        size.toPython() if size is not None else None,
+        _python(g.value(entity, DCAT.byteSize)),
     )
 
 
-def _python(term):
+def _python(term: Node | None) -> Any:
     """A term as the value the record holds: a literal's Python value, an IRI as its string."""
     if term is None:
         return None
