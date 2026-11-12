@@ -23,7 +23,7 @@ class Host:
 
 @dataclass
 class RunRecord:
-    """What rec knows of a run; also what FileStore.edit yields to change it (rec.stores.RunHandle).
+    """What rec knows of a run; also what a store's ``edit`` yields to change it.
 
     ``bundle`` names the run's provenance bundle and ``recorder`` is the rec that writes it, both
     set on the run's first edit.

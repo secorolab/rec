@@ -3,22 +3,8 @@
 from contextlib import AbstractContextManager
 from typing import Protocol
 
-from rdflib import URIRef
-
 from rec import State
 from rec.record import RunRecord
-
-
-class RunHandle(Protocol):
-    """A run held by ``Store.edit``: its state and bundle, and the changes made to it."""
-
-    run_id: str
-    state: State
-    bundle: URIRef | None
-
-    def update(self, **values) -> None:
-        """Set fields of the run that it has one of, e.g. ``state``, ``start_time`` or ``host``."""
-        ...
 
 
 class Store(Protocol):
@@ -26,10 +12,10 @@ class Store(Protocol):
         """Return the stored record of a run, or None if the run is not stored."""
         ...
 
-    def edit(self, run_id: str) -> AbstractContextManager[RunHandle]:
-        """Lock a run for changing and keep the changes when the with block exits.
+    def edit(self, run_id: str) -> AbstractContextManager[RunRecord]:
+        """Lock a run for changing and keep the changes to its record when the with block exits.
 
-        Yields a new run if the run is not stored. Other edits of the same run,
+        Yields a new record if the run is not stored. Other edits of the same run,
         also from other processes, wait until the block exits. If the block
         raises, nothing is kept.
         """

@@ -9,7 +9,7 @@ from rec import State, Verdict, provenance  # noqa: E402
 from rec.observer import Observer  # noqa: E402
 from rec.run import Run  # noqa: E402
 from rec.stores.file_store import FileStore  # noqa: E402
-from rec.stores.mariadb_store import TABLES, MariaDBStore  # noqa: E402
+from rec.stores.mariadb_store import MariaDBStore  # noqa: E402
 
 TEST_DATABASE = os.getenv("REC_TEST_MARIADB_DATABASE")
 pytestmark = pytest.mark.skipif(
@@ -23,7 +23,7 @@ def store():
     prefix = f"rec_test_{uuid4().hex}"
     db = MariaDBStore(db_name=TEST_DATABASE, prefix=prefix)
     yield db
-    db.cursor.execute(f"DROP TABLE IF EXISTS {', '.join(f'{prefix}_{table}' for table in TABLES)}")
+    db.cursor.execute(f"DROP TABLE IF EXISTS {prefix}_runs")
     db.close()
 
 
@@ -32,7 +32,7 @@ class QuickRun(Run):
         return "ok"
 
 
-def test_the_tables_keep_the_whole_record(store, tmp_path):
+def test_a_row_keeps_the_same_bundle_as_a_file(store, tmp_path):
     files = FileStore(tmp_path)
     runs = [QuickRun(observers=[Observer(store), Observer(files)], run_id=f"run-{i}") for i in range(3)]
     for run in runs:
@@ -47,10 +47,6 @@ def test_the_tables_keep_the_whole_record(store, tmp_path):
             provenance.dataset(from_tables).graph(from_tables.bundle),
             provenance.dataset(from_file).graph(from_file.bundle),
         )
-    store.cursor.execute(f"SELECT state, verdict FROM {store.prefix}_runs WHERE run_id = 'run-0'")
-    assert store.cursor.fetchone() == ("complete", "passed")
-    store.cursor.execute(f"SELECT recorder_name FROM {store.prefix}_runs")
-    assert store.cursor.fetchall() == [("rec",)] * 3
     assert store.run_ids(State.COMPLETE) == ["run-0", "run-1", "run-2"]
 
 

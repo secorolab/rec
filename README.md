@@ -65,7 +65,7 @@ MariaDB): only a new run is queued, only a new or queued run starts. A started r
 | Store | Keeps a run as |
 |---|---|
 | `FileStore(dir)` | its bundle, `<run_id>.ld.json`; `fmt=DatasetFormat.TRIG` or `NQUADS` for `.trig`, `.nq` |
-| `MariaDBStore(db_name, prefix)` | a row of `<prefix>_runs`, see [mariadb.sql](rec/stores/mariadb.sql) |
+| `MariaDBStore(db_name, prefix)` | its bundle as JSON-LD in a row of `<prefix>_runs`, see [mariadb.sql](rec/stores/mariadb.sql) |
 
 A run may have several observers, one store each. Each store names the run's bundle on its first
 edit, so two stores hold the same run in differently named bundles. Any object with `load`,
