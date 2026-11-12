@@ -102,11 +102,10 @@ unreserved characters (letters, digits, `-`, `.`, `_`, `~`); a run given none ge
 ## Examples
 
 ```shell
-python examples/file_store_run.py      # JSON-LD and TriG files
-python examples/mariadb_store_run.py   # queue, cancel by id, run
+python examples/robot_runs.py   # passed, failed, cancelled while queued, stopped while running
 ```
 
-The MariaDB example needs the `mariadb` extra and an `.env` at the repository root:
+It records every run in a bundle file under `runs/prov` and in MariaDB, so it needs the `mariadb` extra and an `.env` at the repository root:
 
 ```dotenv
 MARIADB_USER="user"
