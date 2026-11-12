@@ -8,7 +8,6 @@ from rdflib import Graph
 
 pytest.importorskip("mariadb", reason="the MariaDB driver is an optional extra")
 from rec import State, Verdict  # noqa: E402
-from rec.observer import Observer  # noqa: E402
 from rec.run import Run  # noqa: E402
 from rec.stores.mariadb_store import MariaDBStore  # noqa: E402
 
@@ -32,28 +31,35 @@ def store():
     db.close()
 
 
-class QuickRun(Run):
-    def main(self):
-        return "ok"
+def succeed(run):
+    return "ok"
 
 
 def test_a_row_keeps_the_run_as_a_valid_bundle(store):
-    QuickRun(Observer(store), run_id="run-0").run()
-    assert Observer(store).lifecycle("run-0") == (State.COMPLETE, Verdict.PASSED)
+    run = Run(store, "run-0")
+    run.run(succeed)
+    assert run.lifecycle() == (State.COMPLETE, Verdict.PASSED)
     ok, _, report = validate(store.load("run-0"), shacl_graph=SHAPES, inference="rdfs")
     assert ok, report
 
 
 def test_a_queued_run_is_cancelled_by_id_from_another_connection(store):
-    QuickRun(Observer(store), run_id="queued").queue()
+    run = Run(store, "queued")
+    run.queue()
     scheduler = MariaDBStore(db_name=TEST_DATABASE, prefix=store.prefix)
-    Run(Observer(scheduler), run_id="queued").cancel()
+    Run(scheduler, "queued").cancel()
     scheduler.close()
-    assert Observer(store).lifecycle("queued") == (State.CANCELED, Verdict.UNAVAILABLE)
+    assert run.lifecycle() == (State.CANCELED, Verdict.UNAVAILABLE)
 
 
 def test_run_ids_differing_in_case_are_two_runs(store):
-    QuickRun(Observer(store), run_id="Pick-1").run()
-    QuickRun(Observer(store), run_id="pick-1").queue()
-    assert Observer(store).lifecycle("Pick-1") == (State.COMPLETE, Verdict.PASSED)
-    assert Observer(store).lifecycle("pick-1") == (State.QUEUED, Verdict.UNAVAILABLE)
+    Run(store, "Pick-1").run(succeed)
+    Run(store, "pick-1").queue()
+    assert Run(store, "Pick-1").lifecycle() == (State.COMPLETE, Verdict.PASSED)
+    assert Run(store, "pick-1").lifecycle() == (State.QUEUED, Verdict.UNAVAILABLE)
+
+
+@pytest.mark.parametrize("prefix", ["team-a", "logs; DROP TABLE x", ""])
+def test_a_prefix_that_is_not_a_table_name_is_refused(prefix):
+    with pytest.raises(ValueError, match="is not a table prefix"):
+        MariaDBStore(db_name=TEST_DATABASE, prefix=prefix)

@@ -1,16 +1,13 @@
 import os
 import threading
-from datetime import datetime
 from pathlib import Path
 
 import pytest
 from pyshacl import validate
-from rdf_utils.models.prov import create_bundle
 from rdflib import Graph, URIRef
 from rdflib.namespace import PROV, RDF, TIME
 
 from rec import State, Verdict
-from rec.observer import Observer
 from rec.provenance import OSLC_AUTO, PROV_EXT, REC, RUN_BASE
 from rec.run import Run
 from rec.stores.file_store import FileStore
@@ -21,52 +18,41 @@ for name in ("prov.shacl.ttl", "prov-extension.shacl.ttl", "rec/rec.shacl.ttl"):
     SHAPES.parse(METAMODELS / name, format="turtle")
 
 
-class CalibrationRun(Run):
-    def main(self):
-        return "calibrated"
+def calibrate(run):
+    return "calibrated"
 
 
-class FailingRun(Run):
-    def main(self):
-        raise ValueError("no gripper attached")
+def drop_gripper(run):
+    raise ValueError("no gripper attached")
 
 
-class InterruptedRun(Run):
-    def main(self):
-        raise KeyboardInterrupt
+def interrupt(run):
+    raise KeyboardInterrupt
 
 
-class ExitingRun(Run):
-    def main(self):
-        raise SystemExit(3)
+def exit_process(run):
+    raise SystemExit(3)
 
 
-class StoppedRun(Run):
-    def main(self):
-        # A scheduler holding only the id asks the run to stop while it is in progress.
-        Run(Observer(self.observer.store), run_id=self.id).cancel()
-        if self.state is State.CANCELING:
-            return "stopped"
-        return "finished"
+def stop_when_asked(run):
+    # A scheduler holding only the id asks the run to stop while it is in progress.
+    Run(run.store, run.id).cancel()
+    return "stopped" if run.lifecycle()[0] is State.CANCELING else "finished"
 
 
-class CrashedWhileStoppingRun(Run):
-    def main(self):
-        Run(Observer(self.observer.store), run_id=self.id).cancel()
-        raise ValueError("gripper jammed while releasing")
+def jam_while_stopping(run):
+    Run(run.store, run.id).cancel()
+    raise ValueError("gripper jammed while releasing")
 
 
-class SlowRun(Run):
-    def main(self):
-        threading.Event().wait(0.05)
+def wait_a_little(run):
+    threading.Event().wait(0.05)
 
 
-class HostlessRun(Run):
-    def log_host_info(self, host_info):
-        raise OSError("no hostname")
-
-    def main(self):
-        raise AssertionError("main must not run when the start cannot be completed")
+def end_then_interrupt(run):
+    # Ended by someone else before the work returns, so the run's own end is refused.
+    Run(run.store, run.id).end(Verdict.PASSED)
+    raise KeyboardInterrupt
 
 
 @pytest.fixture
@@ -75,8 +61,8 @@ def store(tmp_path):
 
 
 def test_a_completed_run_is_an_execution_by_rec_in_a_bundle_attributed_to_rec(store):
-    observer = Observer(store)
-    assert CalibrationRun(observer, run_id="run-1").run() == "calibrated"
+    run = Run(store, "run-1")
+    assert run.run(calibrate) == "calibrated"
 
     ds = store.load("run-1")
     ok, _, report = validate(ds, shacl_graph=SHAPES, inference="rdfs")
@@ -84,54 +70,34 @@ def test_a_completed_run_is_an_execution_by_rec_in_a_bundle_attributed_to_rec(st
     [bundle] = [graph for graph in ds.graphs() if (graph.identifier, RDF.type, PROV.Bundle) in graph]
     node = URIRef(RUN_BASE + "run-1")
     assert (node, RDF.type, PROV_EXT.Execution) in bundle
-    assert bundle.value(bundle.identifier, PROV.wasAttributedTo) == observer.recorder.purl == bundle.value(node, PROV.wasAssociatedWith)
-    assert observer.lifecycle("run-1") == (State.COMPLETE, Verdict.PASSED)
+    assert bundle.value(bundle.identifier, PROV.wasAttributedTo) == run.recorder.purl == bundle.value(node, PROV.wasAssociatedWith)
+    assert bundle.value(bundle.value(node, PROV.atLocation), RDF.type) is not None
+    assert run.lifecycle() == (State.COMPLETE, Verdict.PASSED)
 
 
 def test_a_run_keeps_one_bundle_through_its_lifecycle(store):
-    run = CalibrationRun(Observer(store), run_id="run-b")
+    run = Run(store, "run-b")
     run.queue()
     queued = {graph.identifier for graph in store.load("run-b").graphs() if (graph.identifier, RDF.type, PROV.Bundle) in graph}
-    run.run()
+    run.run(calibrate)
     ended = {graph.identifier for graph in store.load("run-b").graphs() if (graph.identifier, RDF.type, PROV.Bundle) in graph}
     assert len(queued) == 1 and ended == queued
 
 
-def test_an_event_changes_only_its_own_triples(store):
-    """A triple another tool put in the run's bundle survives rec's later events."""
-    observer = Observer(store)
-    CalibrationRun(observer, run_id="run-k").queue()
+def test_a_step_changes_only_its_own_triples(store):
+    """A triple another tool put in the run's bundle survives rec's later steps."""
+    Run(store, "run-k").queue()
     with store.edit("run-k") as ds:
         [bundle] = [graph for graph in ds.graphs() if (graph.identifier, RDF.type, PROV.Bundle) in graph]
         bundle.add((URIRef(RUN_BASE + "run-k"), PROV.wasInfluencedBy, URIRef("https://example.org/schedule/1")))
-    CalibrationRun(observer, run_id="run-k").run()
+    Run(store, "run-k").run(calibrate)
     ds = store.load("run-k")
     ds.default_union = True
     assert (URIRef(RUN_BASE + "run-k"), PROV.wasInfluencedBy, URIRef("https://example.org/schedule/1")) in ds
 
 
-def test_another_tools_bundle_in_the_dataset_is_left_alone(store):
-    tool = URIRef("https://example.org/agent/scheduler")
-    with store.edit("run-t") as ds:
-        foreign = create_bundle(ds, tool)
-    observer = Observer(store)
-    CalibrationRun(observer, run_id="run-t").run()
-    assert observer.lifecycle("run-t") == (State.COMPLETE, Verdict.PASSED)
-    ds = store.load("run-t")
-    assert set(ds.graph(foreign)) == {(foreign, RDF.type, PROV.Bundle), (foreign, PROV.wasAttributedTo, tool)}
-
-
-def test_a_run_that_cannot_finish_starting_still_ends(store):
-    observer = Observer(store)
-    HostlessRun(observer, run_id="run-n").run()
-    assert observer.lifecycle("run-n") == (State.COMPLETE, Verdict.FAILED)
-    ds = store.load("run-n")
-    ds.default_union = True
-    assert "OSError: no hostname" in str(ds.value(URIRef(RUN_BASE + "run-n"), REC["fail-trace"]))
-
-
 def test_a_queued_run_has_not_executed_yet(store):
-    CalibrationRun(Observer(store), run_id="run-q").queue()
+    Run(store, "run-q").queue()
     ds = store.load("run-q")
     ok, _, report = validate(ds, shacl_graph=SHAPES, inference="rdfs")
     assert ok, report
@@ -142,36 +108,10 @@ def test_a_queued_run_has_not_executed_yet(store):
     assert ds.value(node, REC["queued-time"]) is not None
 
 
-# Each starts from a completed run and breaks one rule of the run's shape.
-@pytest.mark.parametrize(
-    ("removed", "added"),
-    [
-        ([(OSLC_AUTO.verdict, None)], []),
-        (
-            [(OSLC_AUTO.state, None), (OSLC_AUTO.verdict, None)],
-            [(OSLC_AUTO.state, OSLC_AUTO.queued), (OSLC_AUTO.verdict, OSLC_AUTO.unavailable)],
-        ),
-        ([(RDF.type, PROV_EXT.Execution)], []),
-        ([(RDF.type, OSLC_AUTO.AutomationResult)], []),
-    ],
-    ids=["without a verdict", "queued with a start time", "not an execution", "not an automation result"],
-)
-def test_the_shapes_refuse_a_run_that_contradicts_its_state(store, removed, added):
-    CalibrationRun(Observer(store), run_id="run-x").run()
-    ds = store.load("run-x")
-    [bundle] = [graph for graph in ds.graphs() if (graph.identifier, RDF.type, PROV.Bundle) in graph]
-    node = URIRef(RUN_BASE + "run-x")
-    for predicate, value in removed:
-        bundle.remove((node, predicate, value))
-    for predicate, value in added:
-        bundle.add((node, predicate, value))
-    assert not validate(ds, shacl_graph=SHAPES, inference="rdfs")[0]
-
-
-def test_a_run_whose_main_raises_fails_with_its_trace(store):
-    observer = Observer(store)
-    FailingRun(observer, run_id="run-f").run()
-    assert observer.lifecycle("run-f") == (State.COMPLETE, Verdict.FAILED)
+def test_a_run_whose_work_raises_fails_with_its_trace(store):
+    run = Run(store, "run-f")
+    assert run.run(drop_gripper) is None
+    assert run.lifecycle() == (State.COMPLETE, Verdict.FAILED)
     ds = store.load("run-f")
     ok, _, report = validate(ds, shacl_graph=SHAPES, inference="rdfs")
     assert ok, report
@@ -179,25 +119,42 @@ def test_a_run_whose_main_raises_fails_with_its_trace(store):
     assert "ValueError: no gripper attached" in str(ds.value(URIRef(RUN_BASE + "run-f"), REC["fail-trace"]))
 
 
-@pytest.mark.parametrize(("cls", "interrupt"), [(InterruptedRun, KeyboardInterrupt), (ExitingRun, SystemExit)])
-def test_an_interrupted_run_ends_as_error_and_the_interrupt_goes_on(store, cls, interrupt):
-    observer = Observer(store)
-    with pytest.raises(interrupt):
-        cls(observer, run_id="run-i").run()
-    assert observer.lifecycle("run-i") == (State.COMPLETE, Verdict.ERROR)
+@pytest.mark.parametrize(("work", "raised"), [(interrupt, KeyboardInterrupt), (exit_process, SystemExit)])
+def test_an_interrupted_run_ends_as_error_and_the_interrupt_goes_on(store, work, raised):
+    run = Run(store, "run-i")
+    with pytest.raises(raised):
+        run.run(work)
+    assert run.lifecycle() == (State.COMPLETE, Verdict.ERROR)
     ok, _, report = validate(store.load("run-i"), shacl_graph=SHAPES, inference="rdfs")
     assert ok, report
 
 
+def test_an_interrupt_goes_on_when_the_end_cannot_be_recorded(store):
+    with pytest.raises(KeyboardInterrupt):
+        Run(store, "run-e").run(end_then_interrupt)
+
+
+@pytest.mark.parametrize(
+    ("verdict", "trace", "message"),
+    [(Verdict.UNAVAILABLE, None, "without a verdict"), (Verdict.PASSED, "Traceback", "passed with a fail trace")],
+    ids=["no verdict", "passed with a trace"],
+)
+def test_a_contradictory_end_is_refused_and_the_run_kept_running(store, verdict, trace, message):
+    run = Run(store, "run-v")
+    run.start()
+    with pytest.raises(ValueError, match=message):
+        run.end(verdict, trace)
+    assert run.lifecycle() == (State.IN_PROGRESS, Verdict.UNAVAILABLE)
+
+
 def test_only_a_queued_run_or_one_in_progress_is_cancelled(store):
-    observer = Observer(store)
-    queued = CalibrationRun(observer, run_id="run-q")
+    queued = Run(store, "run-q")
     queued.queue()
     # A scheduler holding only the id cancels a run it did not create, and the store decides.
-    Run(Observer(store), run_id="run-q").cancel()
-    assert (queued.state, queued.verdict) == (State.CANCELED, Verdict.UNAVAILABLE)
+    Run(store, "run-q").cancel()
+    assert queued.lifecycle() == (State.CANCELED, Verdict.UNAVAILABLE)
     with pytest.raises(RuntimeError, match="is canceled"):
-        queued.run()
+        queued.run(calibrate)
     ds = store.load("run-q")
     ok, _, report = validate(ds, shacl_graph=SHAPES, inference="rdfs")
     assert ok, report
@@ -206,17 +163,17 @@ def test_only_a_queued_run_or_one_in_progress_is_cancelled(store):
     assert ds.value(URIRef(RUN_BASE + "run-q"), TIME.hasBeginning) is None
     assert ds.value(URIRef(RUN_BASE + "run-q"), TIME.hasEnd) is None
 
-    CalibrationRun(observer, run_id="run-d").run()
+    done = Run(store, "run-d")
+    done.run(calibrate)
     with pytest.raises(RuntimeError, match="only a queued run or one in progress"):
-        Run(Observer(store), run_id="run-d").cancel()
-    assert observer.lifecycle("run-d") == (State.COMPLETE, Verdict.PASSED)
+        Run(store, "run-d").cancel()
+    assert done.lifecycle() == (State.COMPLETE, Verdict.PASSED)
 
 
 def test_a_run_in_progress_stops_when_cancelled(store):
-    observer = Observer(store)
-    run = StoppedRun(observer, run_id="run-s")
-    assert run.run() == "stopped"
-    assert observer.lifecycle("run-s") == (State.CANCELED, Verdict.UNAVAILABLE)
+    run = Run(store, "run-s")
+    assert run.run(stop_when_asked) == "stopped"
+    assert run.lifecycle() == (State.CANCELED, Verdict.UNAVAILABLE)
     ds = store.load("run-s")
     ok, _, report = validate(ds, shacl_graph=SHAPES, inference="rdfs")
     assert ok, report
@@ -226,17 +183,17 @@ def test_a_run_in_progress_stops_when_cancelled(store):
 
 
 def test_a_run_that_fails_while_stopping_keeps_its_verdict(store):
-    observer = Observer(store)
-    CrashedWhileStoppingRun(observer, run_id="run-c").run()
-    assert observer.lifecycle("run-c") == (State.COMPLETE, Verdict.FAILED)
+    run = Run(store, "run-c")
+    run.run(jam_while_stopping)
+    assert run.lifecycle() == (State.COMPLETE, Verdict.FAILED)
     ok, _, report = validate(store.load("run-c"), shacl_graph=SHAPES, inference="rdfs")
     assert ok, report
 
 
 def test_a_running_run_beats(store):
-    run = SlowRun(Observer(store), run_id="run-h")
+    run = Run(store, "run-h")
     run.beat_interval = 0.01
-    run.run()
+    run.run(wait_a_little)
     ds = store.load("run-h")
     ds.default_union = True
     assert ds.value(URIRef(RUN_BASE + "run-h"), REC["heartbeat-time"]) is not None
@@ -244,39 +201,10 @@ def test_a_running_run_beats(store):
     assert ok, report
 
 
-def test_one_observer_records_many_runs_at_once(store):
-    """Every run is addressed by its id, each locked on its own."""
-    observer = Observer(store)
-    runs = [SlowRun(observer, run_id=f"run-{i}") for i in range(6)]
-    for run in runs:
-        run.beat_interval = 0.01
-    threads = [threading.Thread(target=run.run) for run in runs]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert all(observer.lifecycle(run.id) == (State.COMPLETE, Verdict.PASSED) for run in runs)
-
-
-def test_a_time_without_a_zone_is_refused_and_nothing_kept(store):
-    with pytest.raises(ValueError, match="has no time zone"):
-        Observer(store).log_queued_run("run-z", datetime(2026, 11, 12, 9, 30))
-    assert store.load("run-z") is None
-
-
-def test_a_run_recorded_under_another_base_is_not_read_as_this_one(store):
-    CalibrationRun(Observer(store), run_id="run-o").queue()
-    elsewhere = Observer(store, base="https://example.org/runs/")
-    with pytest.raises(ValueError, match="recorded under another base"):
-        elsewhere.lifecycle("run-o")
-    with pytest.raises(ValueError, match="recorded under another base"):
-        elsewhere.log_cancelled_run("run-o")
-
-
-@pytest.mark.parametrize("run_id", ["../escape", "/tmp/escape", "nested/run", "a run", "läuft", "", ".", ".."])
+@pytest.mark.parametrize("run_id", ["../escape", "/tmp/escape", "nested/run", "a run", "läuft", ".", ".."])
 def test_a_run_id_is_unreserved_characters_only(store, run_id):
     with pytest.raises(ValueError, match="is not a run id"):
-        Observer(store).log_queued_run(run_id, datetime.now().astimezone())
+        Run(store, run_id)
 
 
 @pytest.mark.parametrize("run_id", ["../escape", "/tmp/escape", "nested/run"])

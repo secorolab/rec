@@ -11,7 +11,7 @@ description = "Robot Execution Catalog (REC) is a python library to manage data 
 dynamic = ["version"]
 dependencies = [
     "rdflib>=7.6.0",
-    "rdf-utils @ git+https://github.com/minhnh/rdf-utils@main",
+    "rdf-utils @ git+https://github.com/minhnh/rdf-utils@bad7c02ca44de57c2461a354e3543e6d5a09341b",
 ]
 requires-python = ">= 3.12"
 readme = "README.md"

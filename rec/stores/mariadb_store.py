@@ -1,6 +1,7 @@
 """A store keeping runs in MariaDB: a row per run, holding its provenance bundle as JSON-LD."""
 
 import os
+import re
 import threading
 from contextlib import contextmanager
 
@@ -22,6 +23,9 @@ class MariaDBStore:
         :param prefix: Prefix of the table name: ``<prefix>_runs`` has a row per run, ``id`` in the
             order runs were added and ``bundle`` its provenance bundle as JSON-LD
         """
+        # The prefix is part of a table name, which SQL cannot take as a bound parameter.
+        if not re.fullmatch(r"[A-Za-z0-9_]{1,59}", prefix):
+            raise ValueError(f"'{prefix}' is not a table prefix -- use up to 59 letters, digits or '_'")
         load_dotenv()
         self.prefix = prefix
         self.conn = mariadb.connect(
