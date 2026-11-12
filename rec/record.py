@@ -1,7 +1,7 @@
 """What rec records of a run, independent of where it is stored."""
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 from rdf_utils.models.prov import PackageInfo
@@ -26,7 +26,7 @@ class RunRecord:
     """What rec knows of a run; also what FileStore.edit yields to change it (rec.stores.RunHandle).
 
     ``bundle`` names the run's provenance bundle and ``recorder`` is the rec that writes it, both
-    set on the run's first edit. ``packages`` is the software the run used.
+    set on the run's first edit.
     """
 
     run_id: str
@@ -40,7 +40,6 @@ class RunRecord:
     fail_trace: str | None = None
     recorder: PackageInfo | None = None
     host: Host | None = None
-    packages: list[PackageInfo] = field(default_factory=list)
 
     def __post_init__(self):
         if not RUN_ID.fullmatch(self.run_id):
@@ -49,8 +48,3 @@ class RunRecord:
     def update(self, **values):
         for name, value in values.items():
             setattr(self, name, value)
-
-    def add_package(self, package: PackageInfo):
-        if any(kept.purl == package.purl for kept in self.packages):
-            raise ValueError(f"run '{self.run_id}' already has package '{package.purl}' -- each is logged once")
-        self.packages.append(package)

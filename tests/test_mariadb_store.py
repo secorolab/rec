@@ -2,8 +2,6 @@ import os
 from uuid import uuid4
 
 import pytest
-from rdf_utils.models.prov import PackageInfo
-from rdflib import URIRef
 from rdflib.compare import isomorphic
 
 pytest.importorskip("mariadb", reason="the MariaDB driver is an optional extra")
@@ -18,14 +16,6 @@ pytestmark = pytest.mark.skipif(
     not TEST_DATABASE,
     reason="set REC_TEST_MARIADB_DATABASE to run MariaDB integration tests",
 )
-CONTROLLER = PackageInfo(
-    name="controller",
-    purl=URIRef("pkg:git/example.org/lab/controller@0123abcd"),
-    version="1.2.0",
-    revision="0123abcd",
-    repository="https://example.org/lab/controller",
-    dirty=True,
-)
 
 
 @pytest.fixture
@@ -39,7 +29,6 @@ def store():
 
 class QuickRun(Run):
     def main(self):
-        self.log_packages([CONTROLLER])
         return "ok"
 
 
@@ -60,8 +49,8 @@ def test_the_tables_keep_the_whole_record(store, tmp_path):
         )
     store.cursor.execute(f"SELECT state, verdict FROM {store.prefix}_runs WHERE run_id = 'run-0'")
     assert store.cursor.fetchone() == ("complete", "passed")
-    store.cursor.execute(f"SELECT name, recorder FROM {store.prefix}_packages ORDER BY run, recorder")
-    assert store.cursor.fetchall() == [("controller", 0), ("rec", 1)] * 3
+    store.cursor.execute(f"SELECT recorder_name FROM {store.prefix}_runs")
+    assert store.cursor.fetchall() == [("rec",)] * 3
     assert store.run_ids(State.COMPLETE) == ["run-0", "run-1", "run-2"]
 
 

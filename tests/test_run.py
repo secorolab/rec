@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 from pyshacl import validate
 from rdf_utils import DatasetFormat
-from rdf_utils.models.prov import PackageInfo
 from rdflib import Graph, URIRef
 from rdflib.namespace import PROV, RDF, TIME
 
@@ -20,19 +19,10 @@ METAMODELS = Path(os.getenv("REC_METAMODELS_DIR", Path(__file__).resolve().paren
 SHAPES = Graph()
 for name in ("prov.shacl.ttl", "prov-extension.shacl.ttl", "rec/rec.shacl.ttl"):
     SHAPES.parse(METAMODELS / name, format="turtle")
-CONTROLLER = PackageInfo(
-    name="controller",
-    purl=URIRef("pkg:git/example.org/lab/controller@0123abcd"),
-    version="1.2.0",
-    revision="0123abcd",
-    repository="https://example.org/lab/controller",
-    dirty=True,
-)
 
 
 class CalibrationRun(Run):
     def main(self):
-        self.log_packages([CONTROLLER])
         return "calibrated"
 
 
@@ -60,7 +50,7 @@ def store(request, tmp_path):
     return FileStore(tmp_path, fmt=request.param)
 
 
-def test_a_completed_run_is_an_execution_by_rec_of_the_packages_it_used(store):
+def test_a_completed_run_is_an_execution_by_rec(store):
     run = CalibrationRun(observers=[Observer(store)], run_id="run-1")
     run.beat_interval = 0
     assert run.run() == "calibrated"
@@ -74,8 +64,6 @@ def test_a_completed_run_is_an_execution_by_rec_of_the_packages_it_used(store):
     assert (record.bundle, RDF.type, PROV.Bundle) in g
     assert g.value(record.bundle, PROV.wasAttributedTo) == record.recorder.purl == g.value(node, PROV.wasAssociatedWith)
     assert record.recorder.name == "rec"
-    assert record.packages == [CONTROLLER]
-    assert (node, PROV.used, CONTROLLER.purl) in g
 
 
 def test_a_run_keeps_one_bundle_through_its_lifecycle(store):
@@ -179,12 +167,6 @@ def test_a_run_in_progress_stops_when_cancelled(store):
         run.cancel()
 
 
-def test_a_package_logged_twice_is_refused_and_nothing_kept(store):
-    with pytest.raises(ValueError, match="each is logged once"):
-        Observer(store).log_packages("run-v", [CONTROLLER, CONTROLLER])
-    assert store.load("run-v") is None
-
-
 def test_one_observer_records_many_runs_at_once(store):
     """Every run is addressed by its id, and none closes the observer."""
     observer = Observer(store)
@@ -197,7 +179,6 @@ def test_one_observer_records_many_runs_at_once(store):
     for thread in threads:
         thread.join()
     assert store.run_ids(State.COMPLETE) == sorted(run.id for run in runs)
-    assert all(store.load(run.id).packages == [CONTROLLER] for run in runs)
 
 
 @pytest.mark.parametrize("run_id", ["../escape", "/tmp/escape", "nested/run", "a run", "läuft", "", ".", ".."])

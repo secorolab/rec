@@ -9,21 +9,14 @@ CREATE TABLE IF NOT EXISTS {prefix}_runs (
     end_time DATETIME(6),
     heartbeat_time DATETIME(6),
     fail_trace TEXT,
+    recorder_purl TEXT,
+    recorder_name TEXT,
+    recorder_version TEXT,
+    recorder_revision TEXT,
+    recorder_repository TEXT,
+    recorder_dirty BOOL,
     host_hostname TEXT,
     host_os TEXT,
     host_python TEXT,
     host_cpu TEXT
-);
-
-CREATE TABLE IF NOT EXISTS {prefix}_packages (
-    run INT NOT NULL,
-    purl VARCHAR(512) NOT NULL,
-    name TEXT NOT NULL,
-    version TEXT,
-    revision TEXT,
-    repository TEXT,
-    dirty BOOL NOT NULL,
-    recorder BOOL NOT NULL,
-    UNIQUE (run, purl, recorder),
-    FOREIGN KEY (run) REFERENCES {prefix}_runs (id)
 );

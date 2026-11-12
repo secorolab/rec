@@ -4,9 +4,8 @@ from datetime import datetime
 from typing import Any
 
 from rdf_utils import DatasetFormat
-from rdf_utils.models.prov import PackageInfo, add_entity, load_execution_prov, load_pkg_prov
+from rdf_utils.models.prov import PackageInfo, load_execution_prov, load_pkg_prov
 from rdf_utils.models.time import add_wall_instant
-from rdf_utils.models.vocab import URI_SPDX_SW_TYPE_PACKAGE
 from rdflib import XSD, Dataset, Graph, Literal, Namespace, URIRef
 from rdflib.namespace import PROV, RDF, SDO, TIME
 from rdflib.term import Node
@@ -48,8 +47,7 @@ PREFIXES = {
 
 def dataset(record: RunRecord, base: str = RUN_BASE) -> Dataset:
     """The run in its bundle, attributed to its recorder: a `prov-ext:Execution` and an
-    `oslc_auto:AutomationResult` with its state and verdict; once started, of the packages it used
-    by its recorder."""
+    `oslc_auto:AutomationResult` with its state and verdict; once started, run by its recorder."""
     ds = Dataset()
     for prefix, namespace in PREFIXES.items():
         ds.bind(prefix, namespace)
@@ -71,11 +69,6 @@ def dataset(record: RunRecord, base: str = RUN_BASE) -> Dataset:
     if record.fail_trace:
         g.add((run, REC["fail-trace"], Literal(record.fail_trace, datatype=XSD.string)))
 
-    for package in record.packages:
-        load_pkg_prov(g, package)
-        # A software agent the run used is also an entity (PROV-DM 5.3), as prov:used requires.
-        add_entity(g, package.purl)
-    used = [package.purl for package in record.packages]
     ended = None
     if record.end_time:
         ended = URIRef(f"{run}/end")
@@ -83,13 +76,11 @@ def dataset(record: RunRecord, base: str = RUN_BASE) -> Dataset:
     if record.start_time:
         started = URIRef(f"{run}/beginning")
         add_wall_instant(g, started, record.start_time)
-        load_execution_prov(g, run, used, record.recorder.purl, started, ended)
-    else:
+        # What the run executed is recorded by the tool that knows it, in its own bundle.
+        load_execution_prov(g, run, (), record.recorder.purl, started, ended)
+    elif ended is not None:
         # A queued run cancelled before it started: it has an end, but no beginning or recorder.
-        for purl in used:
-            g.add((run, PROV.used, purl))
-        if ended is not None:
-            g.add((run, TIME.hasEnd, ended))
+        g.add((run, TIME.hasEnd, ended))
 
     if record.host:
         host = URIRef(f"{run}/host")
@@ -103,7 +94,7 @@ def dataset(record: RunRecord, base: str = RUN_BASE) -> Dataset:
 
 
 def record(ds: Dataset, run_id: str, base: str = RUN_BASE) -> RunRecord:
-    """The record ``dataset`` wrote; its packages come back in no particular order, a graph having none."""
+    """The record ``dataset`` wrote."""
     run = URIRef(base + run_id)
     g = next(graph for graph in ds.graphs() if (run, OSLC_AUTO.state, None) in graph)
     host = g.value(run, PROV.atLocation)
@@ -119,11 +110,6 @@ def record(ds: Dataset, run_id: str, base: str = RUN_BASE) -> RunRecord:
         fail_trace=_python(g.value(run, REC["fail-trace"])),
         recorder=_package(g, g.value(g.identifier, PROV.wasAttributedTo)),
         host=Host(**{key: _python(g.value(host, predicate)) for key, predicate in HOST_TERMS.items()}) if host else None,
-        packages=[
-            _package(g, purl)
-            for purl in g.objects(run, PROV.used)
-            if (purl, RDF.type, URI_SPDX_SW_TYPE_PACKAGE) in g
-        ],
     )
 
 

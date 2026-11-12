@@ -8,8 +8,6 @@ from collections.abc import Sequence
 from contextlib import ExitStack, contextmanager
 from uuid import uuid4
 
-from rdf_utils.models.prov import PackageInfo
-
 from rec import State, Verdict
 from rec.observer import Observer
 
@@ -174,14 +172,6 @@ class Run:
         """
         for observer in self.observers:
             observer.log_host_info(self.id, host_info)
-
-    def log_packages(self, packages: list[PackageInfo]):
-        """
-        Log the software packages this run used
-        :param packages: e.g. from rdf-utils ``get_py_pkg_info`` or ``get_ros_pkg_info``
-        """
-        for observer in self.observers:
-            observer.log_packages(self.id, packages)
 
 
 def _fail_trace(error):

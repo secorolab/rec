@@ -3,7 +3,6 @@
 from contextlib import AbstractContextManager
 from typing import Protocol
 
-from rdf_utils.models.prov import PackageInfo
 from rdflib import URIRef
 
 from rec import State
@@ -19,10 +18,6 @@ class RunHandle(Protocol):
 
     def update(self, **values) -> None:
         """Set fields of the run that it has one of, e.g. ``state``, ``start_time`` or ``host``."""
-        ...
-
-    def add_package(self, package: PackageInfo) -> None:
-        """Add a package the run used; raises ValueError if the run already has its purl."""
         ...
 
 

@@ -1,4 +1,4 @@
-"""A store keeping runs in MariaDB tables: a row per run, and a row per package it used or was recorded by."""
+"""A store keeping runs in MariaDB tables: a row per run."""
 
 import os
 import threading
@@ -17,9 +17,14 @@ from rec import State, Verdict
 from rec.record import Host, RunRecord
 from rec.stores import RunHandle, Store
 
-# The columns of `<prefix>_packages` besides `run` and `recorder`: what `load_pkg_prov` records.
-PACKAGE_COLUMNS = ("purl", "name", "version", "revision", "repository", "dirty")
-TABLES = ("packages", "runs")
+# The fields of a run kept as `<field>_<item>` columns: what `load_pkg_prov` records of the
+# recorder, and the host.
+PARTS = {
+    "recorder": ("purl", "name", "version", "revision", "repository", "dirty"),
+    "host": tuple(item.name for item in fields(Host)),
+}
+TIMES = ("queued_time", "start_time", "end_time", "heartbeat_time")
+TABLES = ("runs",)
 
 
 class MariaDBStore(Store):
@@ -30,8 +35,7 @@ class MariaDBStore(Store):
 
         :param db_name: Name of the database
         :param prefix: Prefix of the table names: ``<prefix>_runs`` has a row per run, ``id`` in the
-            order runs were added; ``<prefix>_packages`` has a row per package, ``run`` naming its
-            run's ``id`` and ``recorder`` set for the rec that recorded it
+            order runs were added
         """
         load_dotenv()
         self.db_name = db_name
@@ -56,26 +60,21 @@ class MariaDBStore(Store):
         with self._lock, self.conn.cursor(dictionary=True) as cursor:
             cursor.execute(f"SELECT * FROM {self.prefix}_runs WHERE run_id = ?", (run_id,))
             columns = cursor.fetchone()
-            if columns is None:
-                return None
-            cursor.execute(f"SELECT * FROM {self.prefix}_packages WHERE run = ?", (columns["id"],))
-            packages = cursor.fetchall()
-        host = {item.name: columns.pop(f"host_{item.name}") for item in fields(Host)}
-        times = {name: columns[name].replace(tzinfo=UTC) for name in ("queued_time", "start_time", "end_time", "heartbeat_time") if columns[name]}
-        by_role = {True: [], False: []}
-        for row in packages:
-            values = {name: row[name] for name in PACKAGE_COLUMNS}
-            by_role[bool(row["recorder"])].append(PackageInfo(**values | {"purl": URIRef(values["purl"]), "dirty": bool(values["dirty"])}))
+        if columns is None:
+            return None
+        host = {item: columns[f"host_{item}"] for item in PARTS["host"]}
+        recorder = {item: columns[f"recorder_{item}"] for item in PARTS["recorder"]}
         return RunRecord(
             run_id=run_id,
             bundle=URIRef(columns["bundle"]) if columns["bundle"] else None,
             state=State(columns["state"]),
             verdict=Verdict(columns["verdict"]),
             fail_trace=columns["fail_trace"],
-            recorder=next(iter(by_role[True]), None),
+            recorder=PackageInfo(**recorder | {"purl": URIRef(recorder["purl"]), "dirty": bool(recorder["dirty"])})
+            if recorder["purl"]
+            else None,
             host=Host(**host) if any(value is not None for value in host.values()) else None,
-            packages=by_role[False],
-            **times,
+            **{name: columns[name].replace(tzinfo=UTC) for name in TIMES if columns[name]},
         )
 
     @contextmanager
@@ -116,13 +115,13 @@ class MariaDBStore(Store):
 
 
 class MariaDBRun(RunHandle):
-    """A run's rows, locked by the transaction of the edit that yields it; each change is one statement."""
+    """A run's row, locked by the transaction of the edit that yields it; each change is one statement."""
 
     def __init__(self, store: MariaDBStore, run_id: str, id: int, state: State, bundle: URIRef | None):
         """
         :param store: The store whose transaction holds the run
         :param run_id: The run's id
-        :param id: The run's ``id`` in ``<prefix>_runs``, which its package rows name as ``run``
+        :param id: The run's ``id`` in ``<prefix>_runs``
         :param state: The run's state when the edit began
         :param bundle: The run's bundle when the edit began
         """
@@ -133,36 +132,20 @@ class MariaDBRun(RunHandle):
         self.bundle = bundle
 
     def update(self, **values):
-        if "recorder" in values:
-            self._insert_package(values.pop("recorder"), recorder=True)
         columns = {}
         for name, value in values.items():
-            if name == "host":
-                columns |= {f"host_{item.name}": getattr(value, item.name) if value else None for item in fields(Host)}
-            elif isinstance(value, datetime):
+            if name in PARTS:
+                columns |= {f"{name}_{item}": getattr(value, item) if value else None for item in PARTS[name]}
+            else:
+                columns[name] = value
+        for name, value in columns.items():
+            if isinstance(value, datetime):
                 columns[name] = value.astimezone(UTC).replace(tzinfo=None)
             elif isinstance(value, (Enum, URIRef)):
                 columns[name] = str(value)
-            else:
-                columns[name] = value
-        if columns:
-            self.store.cursor.execute(
-                f"UPDATE {self.store.prefix}_runs SET {', '.join(f'`{name}` = ?' for name in columns)} WHERE id = ?",
-                (*columns.values(), self.id),
-            )
+        self.store.cursor.execute(
+            f"UPDATE {self.store.prefix}_runs SET {', '.join(f'`{name}` = ?' for name in columns)} WHERE id = ?",
+            (*columns.values(), self.id),
+        )
         self.state = values.get("state", self.state)
         self.bundle = values.get("bundle", self.bundle)
-
-    def add_package(self, package: PackageInfo):
-        try:
-            self._insert_package(package, recorder=False)
-        except mariadb.IntegrityError as error:
-            raise ValueError(f"run '{self.run_id}' already has package '{package.purl}' -- each is logged once") from error
-
-    def _insert_package(self, package: PackageInfo, recorder: bool):
-        values = [str(getattr(package, name)) if name == "purl" else getattr(package, name) for name in PACKAGE_COLUMNS]
-        self.store.cursor.execute(
-            f"INSERT INTO {self.store.prefix}_packages (run, {', '.join(f'`{name}`' for name in PACKAGE_COLUMNS)}, recorder)"
-            f" VALUES (?{', ?' * len(PACKAGE_COLUMNS)}, ?)",
-            (self.id, *values, recorder),
-        )

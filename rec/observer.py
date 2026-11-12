@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from uuid import uuid4
 
-from rdf_utils.models.prov import PackageInfo, get_py_pkg_info
+from rdf_utils.models.prov import get_py_pkg_info
 from rdflib import URIRef
 
 from rec import State, Verdict
@@ -100,12 +100,6 @@ class Observer:
         """Record the machine executing the run, from ``hostname``, ``os``, ``python`` and ``cpu``."""
         with self._run(run_id) as run:
             run.update(host=Host(host_info.get("hostname"), host_info.get("os"), host_info.get("python"), host_info.get("cpu")))
-
-    def log_packages(self, run_id: str, packages: list[PackageInfo]):
-        """Record the software packages the run used, e.g. from rdf-utils `get_py_pkg_info`; refuses a purl twice."""
-        with self._run(run_id) as run:
-            for package in packages:
-                run.add_package(package)
 
     def close(self):
         self.store.close()
