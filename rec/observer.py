@@ -48,8 +48,11 @@ class Observer:
             raise ValueError(f"'{run_id}' is not a run id -- use letters, digits, '-', '.', '_' or '~', not '.' or '..'")
         run = URIRef(self.base + run_id)
         with self.store.edit(run_id) as ds:
-            bundle = next((graph for graph in ds.graphs() if (graph.identifier, RDF.type, PROV.Bundle) in graph), None)
+            # The run's own bundle: another tool may keep its bundles in the same dataset.
+            bundle = next((graph for graph in ds.graphs() if (run, OSLC_AUTO.state, None) in graph), None)
             if bundle is None:
+                if any((None, OSLC_AUTO.state, None) in graph for graph in ds.graphs()):
+                    raise ValueError(f"the bundle of run '{run_id}' has no '{run}' -- it was recorded under another base")
                 bundle = ds.graph(create_bundle(ds, self.recorder.purl))
                 load_pkg_prov(bundle, self.recorder)
                 bundle.add((run, RDF.type, PROV_EXT.Execution))

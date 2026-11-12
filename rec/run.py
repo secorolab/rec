@@ -86,10 +86,11 @@ class Run:
         """
         self.observer.log_started_run(self.id, datetime.datetime.now(datetime.UTC))
         logger.info("Started run %s", self.id)
-        self.log_host_info(host_info())
         beating = threading.Thread(target=self._beat, daemon=True) if self.beat_interval > 0 else None
         error = None
+        # Everything after the start is inside: whatever fails, the started run gets its end.
         try:
+            self.log_host_info(host_info())
             if beating is not None:
                 beating.start()
             self.result = self.main()
@@ -98,7 +99,7 @@ class Run:
         finally:
             # Stopped before the end is recorded: a late beat would find the run ended.
             self._stop_beating.set()
-            if beating is not None:
+            if beating is not None and beating.is_alive():
                 beating.join()
         if error is None:
             verdict = Verdict.PASSED

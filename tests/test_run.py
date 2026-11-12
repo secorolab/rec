@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from pyshacl import validate
+from rdf_utils.models.prov import create_bundle
 from rdflib import Graph, URIRef
 from rdflib.namespace import PROV, RDF, TIME
 
@@ -60,6 +61,14 @@ class SlowRun(Run):
         threading.Event().wait(0.05)
 
 
+class HostlessRun(Run):
+    def log_host_info(self, host_info):
+        raise OSError("no hostname")
+
+    def main(self):
+        raise AssertionError("main must not run when the start cannot be completed")
+
+
 @pytest.fixture
 def store(tmp_path):
     return FileStore(tmp_path)
@@ -99,6 +108,26 @@ def test_an_event_changes_only_its_own_triples(store):
     ds = store.load("run-k")
     ds.default_union = True
     assert (URIRef(RUN_BASE + "run-k"), PROV.wasInfluencedBy, URIRef("https://example.org/schedule/1")) in ds
+
+
+def test_another_tools_bundle_in_the_dataset_is_left_alone(store):
+    tool = URIRef("https://example.org/agent/scheduler")
+    with store.edit("run-t") as ds:
+        foreign = create_bundle(ds, tool)
+    observer = Observer(store)
+    CalibrationRun(observer, run_id="run-t").run()
+    assert observer.lifecycle("run-t") == (State.COMPLETE, Verdict.PASSED)
+    ds = store.load("run-t")
+    assert set(ds.graph(foreign)) == {(foreign, RDF.type, PROV.Bundle), (foreign, PROV.wasAttributedTo, tool)}
+
+
+def test_a_run_that_cannot_finish_starting_still_ends(store):
+    observer = Observer(store)
+    HostlessRun(observer, run_id="run-n").run()
+    assert observer.lifecycle("run-n") == (State.COMPLETE, Verdict.FAILED)
+    ds = store.load("run-n")
+    ds.default_union = True
+    assert "OSError: no hostname" in str(ds.value(URIRef(RUN_BASE + "run-n"), REC["fail-trace"]))
 
 
 def test_a_queued_run_has_not_executed_yet(store):
@@ -237,8 +266,11 @@ def test_a_time_without_a_zone_is_refused_and_nothing_kept(store):
 
 def test_a_run_recorded_under_another_base_is_not_read_as_this_one(store):
     CalibrationRun(Observer(store), run_id="run-o").queue()
+    elsewhere = Observer(store, base="https://example.org/runs/")
     with pytest.raises(ValueError, match="recorded under another base"):
-        Observer(store, base="https://example.org/runs/").lifecycle("run-o")
+        elsewhere.lifecycle("run-o")
+    with pytest.raises(ValueError, match="recorded under another base"):
+        elsewhere.log_cancelled_run("run-o")
 
 
 @pytest.mark.parametrize("run_id", ["../escape", "/tmp/escape", "nested/run", "a run", "läuft", "", ".", ".."])
