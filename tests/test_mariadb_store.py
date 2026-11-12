@@ -1,16 +1,21 @@
 import os
+from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from rdflib.compare import isomorphic
+from pyshacl import validate
+from rdflib import Graph
 
 pytest.importorskip("mariadb", reason="the MariaDB driver is an optional extra")
-from rec import State, Verdict, provenance  # noqa: E402
+from rec import State, Verdict  # noqa: E402
 from rec.observer import Observer  # noqa: E402
 from rec.run import Run  # noqa: E402
-from rec.stores.file_store import FileStore  # noqa: E402
 from rec.stores.mariadb_store import MariaDBStore  # noqa: E402
 
+METAMODELS = Path(os.getenv("REC_METAMODELS_DIR", Path(__file__).resolve().parents[2] / "metamodels"))
+SHAPES = Graph()
+for name in ("prov.shacl.ttl", "prov-extension.shacl.ttl", "rec/rec.shacl.ttl"):
+    SHAPES.parse(METAMODELS / name, format="turtle")
 TEST_DATABASE = os.getenv("REC_TEST_MARIADB_DATABASE")
 pytestmark = pytest.mark.skipif(
     not TEST_DATABASE,
@@ -32,26 +37,23 @@ class QuickRun(Run):
         return "ok"
 
 
-def test_a_row_keeps_the_same_bundle_as_a_file(store, tmp_path):
-    files = FileStore(tmp_path)
-    runs = [QuickRun(observers=[Observer(store), Observer(files)], run_id=f"run-{i}") for i in range(3)]
-    for run in runs:
-        run.beat_interval = 0
-        run.run()
-    for run in runs:
-        from_tables, from_file = store.load(run.id), files.load(run.id)
-        assert from_tables is not None and from_file is not None
-        # Each store mints its own bundle on the run's first edit; the run inside it is the same.
-        from_tables.bundle = from_file.bundle
-        assert isomorphic(
-            provenance.dataset(from_tables).graph(from_tables.bundle),
-            provenance.dataset(from_file).graph(from_file.bundle),
-        )
-    assert store.run_ids(State.COMPLETE) == ["run-0", "run-1", "run-2"]
+def test_a_row_keeps_the_run_as_a_valid_bundle(store):
+    QuickRun(Observer(store), run_id="run-0").run()
+    assert Observer(store).lifecycle("run-0") == (State.COMPLETE, Verdict.PASSED)
+    ok, _, report = validate(store.load("run-0"), shacl_graph=SHAPES, inference="rdfs")
+    assert ok, report
 
 
-def test_a_queued_run_is_cancelled_by_id(store):
-    QuickRun(observers=[Observer(store)], run_id="queued").queue()
-    assert store.run_ids(State.IN_PROGRESS) == []
-    Run(observers=[Observer(MariaDBStore(db_name=TEST_DATABASE, prefix=store.prefix))], run_id="queued").cancel()
-    assert (store.load("queued").state, store.load("queued").verdict) == (State.CANCELED, Verdict.UNAVAILABLE)
+def test_a_queued_run_is_cancelled_by_id_from_another_connection(store):
+    QuickRun(Observer(store), run_id="queued").queue()
+    scheduler = MariaDBStore(db_name=TEST_DATABASE, prefix=store.prefix)
+    Run(Observer(scheduler), run_id="queued").cancel()
+    scheduler.close()
+    assert Observer(store).lifecycle("queued") == (State.CANCELED, Verdict.UNAVAILABLE)
+
+
+def test_run_ids_differing_in_case_are_two_runs(store):
+    QuickRun(Observer(store), run_id="Pick-1").run()
+    QuickRun(Observer(store), run_id="pick-1").queue()
+    assert Observer(store).lifecycle("Pick-1") == (State.COMPLETE, Verdict.PASSED)
+    assert Observer(store).lifecycle("pick-1") == (State.QUEUED, Verdict.UNAVAILABLE)

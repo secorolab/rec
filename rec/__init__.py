@@ -15,6 +15,5 @@ class State(StrEnum):
 class Verdict(StrEnum):
     UNAVAILABLE = "unavailable"
     PASSED = "passed"
-    WARNING = "warning"
     FAILED = "failed"
     ERROR = "error"

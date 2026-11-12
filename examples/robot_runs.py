@@ -1,4 +1,4 @@
-"""Record robot runs in a PROV bundle file and in MariaDB: one passes, one fails, one is
+"""Record robot runs, first as bundle files and then in MariaDB: one passes, one fails, one is
 cancelled while queued and one is stopped while it runs.
 
 Needs the `mariadb` extra and the connection settings in `.env` (see the README).
@@ -48,31 +48,31 @@ class DrawerOpeningRun(Run):
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    files, tables = FileStore("runs/prov"), MariaDBStore(db_name="logbook", prefix="logs")
-    observers = [Observer(files), Observer(tables)]
+    # A scheduler holds only the run ids, and its own store on the same files or tables.
+    for store, scheduler_store in (
+        (FileStore("runs/prov"), FileStore("runs/prov")),
+        (MariaDBStore(db_name="logbook", prefix="logs"), MariaDBStore(db_name="logbook", prefix="logs")),
+    ):
+        observer, scheduler = Observer(store), Observer(scheduler_store)
 
-    passed = PickPlaceRun(observers=observers, run_id="pick-place-1")
-    # A short beat, so the run records a few heartbeats while it moves.
-    passed.beat_interval = 1
-    passed.run()
+        passed = PickPlaceRun(observer, run_id="pick-place-1")
+        # A short beat, so the run records a few heartbeats while it moves.
+        passed.beat_interval = 1
+        passed.run()
 
-    DrawerOpeningRun(observers=observers, run_id="drawer-1").run()
+        DrawerOpeningRun(observer, run_id="drawer-1").run()
 
-    # A scheduler holds only the ids, and its own connection to the same stores.
-    scheduler = [Observer(FileStore("runs/prov")), Observer(MariaDBStore(db_name="logbook", prefix="logs"))]
-    queued = PickPlaceRun(observers=observers, run_id="pick-place-2")
-    queued.queue()
-    Run(observers=scheduler, run_id="pick-place-2").cancel()
+        PickPlaceRun(observer, run_id="pick-place-2").queue()
+        Run(scheduler, run_id="pick-place-2").cancel()
 
-    stopped = PickPlaceRun(observers=observers, run_id="pick-place-3")
-    running = threading.Thread(target=stopped.run)
-    running.start()
-    time.sleep(1.2)
-    Run(observers=scheduler, run_id="pick-place-3").cancel()
-    running.join()
+        stopped = PickPlaceRun(observer, run_id="pick-place-3")
+        running = threading.Thread(target=stopped.run)
+        running.start()
+        time.sleep(1.2)
+        Run(scheduler, run_id="pick-place-3").cancel()
+        running.join()
 
-    for run_id in ("pick-place-1", "drawer-1", "pick-place-2", "pick-place-3"):
-        record = tables.load(run_id)
-        print(f"{run_id}: {record.state} {record.verdict} heartbeat={record.heartbeat_time} -> {files.path(run_id)}")
-    for observer in [*observers, *scheduler]:
-        observer.close()
+        for run_id in ("pick-place-1", "drawer-1", "pick-place-2", "pick-place-3"):
+            print(type(store).__name__, run_id, *observer.lifecycle(run_id))
+    store.close()
+    scheduler_store.close()

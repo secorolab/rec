@@ -1,21 +1,18 @@
-"""A store keeping runs in MariaDB: a row per run, holding its provenance bundle."""
+"""A store keeping runs in MariaDB: a row per run, holding its provenance bundle as JSON-LD."""
 
 import os
 import threading
 from contextlib import contextmanager
-from importlib.resources import files
 
 import mariadb
 from dotenv import load_dotenv
 from rdf_utils import DatasetFormat
 from rdflib import Dataset
 
-from rec import State, provenance
-from rec.record import RunRecord
-from rec.stores import Store
+from rec.provenance import CONTEXT
 
 
-class MariaDBStore(Store):
+class MariaDBStore:
     def __init__(self, db_name: str = "logbook", prefix: str = "logs"):
         """
         Store in MariaDB tables, connecting with ``MARIADB_USER``, ``MARIADB_PASSWORD``,
@@ -26,7 +23,6 @@ class MariaDBStore(Store):
             order runs were added and ``bundle`` its provenance bundle as JSON-LD
         """
         load_dotenv()
-        self.db_name = db_name
         self.prefix = prefix
         self.conn = mariadb.connect(
             user=os.getenv("MARIADB_USER"),
@@ -39,52 +35,46 @@ class MariaDBStore(Store):
         self.cursor = self.conn.cursor()
         # One connection for every thread using the store, so one statement or transaction at a time.
         self._lock = threading.RLock()
-        schema = files("rec.stores").joinpath("mariadb.sql").read_text().format(prefix=prefix)
-        for statement in schema.split(";"):
-            if statement.strip():
-                self.cursor.execute(statement)
+        # Binary ASCII: a run id is case-sensitive, and the default collation would fold `Pick-1` into `pick-1`.
+        self.cursor.execute(
+            f"CREATE TABLE IF NOT EXISTS {prefix}_runs ("
+            "id INT AUTO_INCREMENT PRIMARY KEY, "
+            "run_id VARCHAR(255) CHARACTER SET ascii COLLATE ascii_bin NOT NULL UNIQUE, "
+            "bundle LONGTEXT)"
+        )
 
-    def load(self, run_id: str) -> RunRecord | None:
+    def load(self, run_id: str) -> Dataset | None:
+        """Return the run's bundle as stored, or None if the run is not stored."""
         with self._lock:
             self.cursor.execute(f"SELECT bundle FROM {self.prefix}_runs WHERE run_id = ?", (run_id,))
             row = self.cursor.fetchone()
         if row is None or row[0] is None:
             return None
-        return provenance.record(Dataset().parse(data=row[0], format=DatasetFormat.JSON_LD), run_id)
+        return Dataset().parse(data=row[0], format=DatasetFormat.JSON_LD)
 
     @contextmanager
     def edit(self, run_id: str):
-        """Yield the run's ``RunRecord`` in one transaction, and save it when the block exits; roll back if it raises.
-
-        The run's row is locked with ``SELECT ... FOR UPDATE``, and inserted first if the run is new.
-        """
+        """Yield the run's dataset in one transaction, empty if the run is new, and save it when the block exits; roll back if it raises."""
         with self._lock:
             self.conn.begin()
             try:
-                self.cursor.execute(f"SELECT id, bundle FROM {self.prefix}_runs WHERE run_id = ? FOR UPDATE", (run_id,))
-                row = self.cursor.fetchone()
-                if row is None:
-                    record = RunRecord(run_id)
-                    # Inserted before the block runs, so a concurrent edit of the same new run waits on its lock.
-                    self.cursor.execute(f"INSERT INTO {self.prefix}_runs (run_id) VALUES (?) RETURNING id, bundle", (run_id,))
-                    row = self.cursor.fetchone()
-                else:
-                    record = provenance.record(Dataset().parse(data=row[1], format=DatasetFormat.JSON_LD), run_id)
-                yield record
+                # Locks the run's row, inserting it if new. A SELECT ... FOR UPDATE of a missing row takes
+                # only a gap lock, which two edits of new runs both get, and then deadlock on their inserts.
                 self.cursor.execute(
-                    f"UPDATE {self.prefix}_runs SET bundle = ? WHERE id = ?",
-                    (provenance.serialize(provenance.dataset(record), DatasetFormat.JSON_LD), row[0]),
+                    f"INSERT INTO {self.prefix}_runs (run_id) VALUES (?) ON DUPLICATE KEY UPDATE run_id = run_id", (run_id,)
+                )
+                self.cursor.execute(f"SELECT bundle FROM {self.prefix}_runs WHERE run_id = ?", (run_id,))
+                bundle = self.cursor.fetchone()[0]
+                ds = Dataset().parse(data=bundle, format=DatasetFormat.JSON_LD) if bundle else Dataset()
+                yield ds
+                self.cursor.execute(
+                    f"UPDATE {self.prefix}_runs SET bundle = ? WHERE run_id = ?",
+                    (ds.serialize(format=DatasetFormat.JSON_LD, context=CONTEXT), run_id),
                 )
             except BaseException:
                 self.conn.rollback()
                 raise
             self.conn.commit()
-
-    def run_ids(self, state: State | None = None) -> list[str]:
-        with self._lock:
-            self.cursor.execute(f"SELECT run_id FROM {self.prefix}_runs ORDER BY id")
-            run_ids = [row[0] for row in self.cursor.fetchall()]
-        return [run_id for run_id in run_ids if state is None or self.load(run_id).state is state]
 
     def close(self) -> None:
         self.cursor.close()

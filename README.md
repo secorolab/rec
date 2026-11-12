@@ -27,13 +27,17 @@ class PickPlaceRun(Run):
         return "placed"
 
 
-observer = Observer(FileStore("runs/prov"))
-PickPlaceRun(observers=[observer], run_id="pick-place-1").run()
-observer.close()
+PickPlaceRun(Observer(FileStore("runs/prov")), run_id="pick-place-1").run()
 ```
 
 `run()` records the start and the host, runs `main`, and ends the run as `passed`, `failed`
-(`main` raised) or `error` (interrupted). It returns what `main` returned; rec does not record it.
+(`main` raised) or `error` (interrupted, e.g. `KeyboardInterrupt` or `SystemExit`, which `run()`
+raises again once recorded). It returns what `main` returned; rec does not record it.
+
+Each event changes only its own triples in the run's bundle: the store parses the bundle under its
+lock, the `Observer` checks the run's state and sets what the event changes, and the store writes
+it back. rdf-utils writes the bundle (`create_bundle`), rec as its software agent (`load_pkg_prov`),
+the execution (`load_execution_prov`) and its instants (`add_wall_instant`), each once.
 
 What a run executes, the software and files it uses or generates, and its steps, are recorded by
 the tool that knows them, with rdf-utils' `add_file_entity`, `add_activity` and the `load_*_prov`
@@ -44,41 +48,33 @@ helpers, in that tool's own bundle.
 State lives in the store, so any `Run` with the same id sees and changes the same run:
 
 ```python
-DrawerRun(observers=[observer], run_id="drawer-2").queue()
+DrawerRun(Observer(MariaDBStore()), run_id="drawer-2").queue()
 
 # elsewhere, e.g. a scheduler with its own connection
-Run(observers=[Observer(MariaDBStore())], run_id="drawer-2").cancel()
+Run(Observer(MariaDBStore()), run_id="drawer-2").cancel()
 ```
 
 | State when cancelled | Result |
 |---|---|
-| `queued` | `canceled` |
-| `in-progress` | `canceling`; `main` sees `self.state is State.CANCELING`, returns, and the run ends `canceled` |
+| `queued` | `canceled`; it never started, so it has no beginning or end |
+| `in-progress` | `canceling`; `main` sees `self.state is State.CANCELING`, returns, and the run ends `canceled`; a `main` that raises instead ends `complete` with its verdict |
 | anything else | `RuntimeError` |
 
-The store decides every step under a lock (`flock` for files, `SELECT ... FOR UPDATE` for
-MariaDB): only a new run is queued, only a new or queued run starts. A started run beats every
-`beat_interval` seconds, recorded as `rec:heartbeat-time`.
+The store decides every step under a lock (`flock` for files, the run's row for MariaDB): only a
+new run is queued, only a new or queued run starts. A started run beats every `beat_interval`
+seconds, recorded as `rec:heartbeat-time`; a beat that fails is logged and the next one tried.
 
 ## Stores
 
 | Store | Keeps a run as |
 |---|---|
-| `FileStore(dir)` | its bundle, `<run_id>.ld.json`; `fmt=DatasetFormat.TRIG` or `NQUADS` for `.trig`, `.nq` |
-| `MariaDBStore(db_name, prefix)` | its bundle as JSON-LD in a row of `<prefix>_runs`, see [mariadb.sql](rec/stores/mariadb.sql) |
+| `FileStore(dir)` | its bundle, `<run_id>.ld.json` |
+| `MariaDBStore(db_name, prefix)` | its bundle as JSON-LD in a row of `<prefix>_runs` (`id`, `run_id`, `bundle`) |
 
-A run may have several observers, one store each. Each store names the run's bundle on its first
-edit, so two stores hold the same run in differently named bundles. Any object with `load`,
-`edit`, `run_ids` and `close` is a store (`rec.stores.Store`).
+`load(run_id)` returns the run's bundle as an rdflib `Dataset`; `Observer.lifecycle(run_id)` gives
+its state and verdict. A run is recorded in one store.
 
 ## The PROV bundle
-
-```python
-from rec import provenance
-
-ds = provenance.dataset(store.load("pick-place-1"))   # RunRecord -> rdflib Dataset
-record = provenance.record(ds, "pick-place-1")        # and back
-```
 
 ```trig
 <urn:uuid:7f1c…> {
@@ -96,8 +92,13 @@ record = provenance.record(ds, "pick-place-1")        # and back
 }
 ```
 
-rec is recorded by rdf-utils' `load_pkg_prov`, named by its purl. A run id is RFC 3986
-unreserved characters (letters, digits, `-`, `.`, `_`, `~`); a run given none gets a UUID.
+The bundle is attributed to the rec that first recorded the run (e.g. a scheduler that queued it);
+the run is associated with the rec that started it. The run takes its state and verdict terms from
+OSLC Automation 2.1; it is not a conformant `oslc_auto:AutomationResult`, which also needs an
+automation plan, a title and an identifier.
+
+A run id is RFC 3986 unreserved characters (letters, digits, `-`, `.`, `_`, `~`); a run given none
+gets a UUID. The run's node is `<base><run_id>`, `base` given to the `Observer`.
 
 ## Examples
 
@@ -105,7 +106,7 @@ unreserved characters (letters, digits, `-`, `.`, `_`, `~`); a run given none ge
 python examples/robot_runs.py   # passed, failed, cancelled while queued, stopped while running
 ```
 
-It records every run in a bundle file under `runs/prov` and in MariaDB, so it needs the `mariadb` extra and an `.env` at the repository root:
+It records the runs as bundle files under `runs/prov`, then in MariaDB, so it needs the `mariadb` extra and an `.env` at the repository root:
 
 ```dotenv
 MARIADB_USER="user"
