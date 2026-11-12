@@ -1,298 +1,199 @@
-import datetime
+"""A run and its lifecycle, recorded in a store as the run's provenance bundle."""
+
+from __future__ import annotations
+
+import logging
+import platform
+import socket
 import threading
-from typing import Sequence
+import traceback
+from collections.abc import Callable
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+from uuid import uuid4
 
-from rec.observers.base import BaseObserver
+from rdf_utils.models.prov import create_bundle, get_py_pkg_info, load_execution_prov, load_pkg_prov
+from rdf_utils.models.time import add_wall_instant
+from rdflib import XSD, Literal, URIRef
+from rdflib.namespace import PROV, RDF, TIME
 
+from rec import State, Verdict
+from rec.provenance import HOST_TERMS, OSLC_AUTO, PROV_EXT, REC, RUN_BASE, RUN_ID, STATES, VERDICTS
 
-class IntervalTimer(threading.Thread):
-    @classmethod
-    def create(cls, func, interval=10):
-        stop_event = threading.Event()
-        timer_thread = cls(stop_event, func, interval)
-        return stop_event, timer_thread
+if TYPE_CHECKING:
+    # The MariaDB driver is an optional extra.
+    from rec.stores.file_store import FileStore
+    from rec.stores.mariadb_store import MariaDBStore
 
-    def __init__(self, event, func, interval=10.0):
-        super().__init__()
-        self.stopped = event
-        self.func = func
-        self.interval = interval
-
-    def run(self):
-        while not self.stopped.wait(self.interval):
-            self.func()
-        self.func()
+logger = logging.getLogger(__name__)
 
 
 class Run:
-    def __init__(
-        self,
-        observers: Sequence[BaseObserver] = [],
-        ingredients: list = [],
-        run_id: int = None,
-        scenario=None,
-        pre_run_hooks: list = [],
-        post_run_hooks: list = [],
-        **kwargs,
-    ):
-        self._id = run_id
-        self.observers = observers
-        self.ingredients = ingredients
-        self.start_time = None
-        self.end_time = None
-        self.status = None
-        self.result = None
-        self.pre_run_hooks = pre_run_hooks
-        self.post_run_hooks = post_run_hooks
+    """A run, recorded in its store as a `prov-ext:Execution` and an `oslc_auto:AutomationResult`.
 
-        self.heartbeat = None
-        self.beat_interval = 10
+    The run lives in its own `prov:Bundle`, attributed to the rec that first recorded it. Every
+    step is one edit of the bundle the store parsed under its lock: the run's state is checked and
+    only the step's triples change. Any holder of the id reaches the same run through the store.
+    """
 
-    def _get_active_run(self):
-        if self._id is not None:
-            # We start with a known ID, we probably don't need to do anything
-            pass
-        if self._id is None:
-            # First query the DB to see if there is any run marked as active.
-            _id = self.observers[0].query_active_run()
-            # If no run is marked as active, create one in the DB and return the ID
-            return _id
+    def __init__(self, store: FileStore | MariaDBStore, run_id: str | None = None, base: str = RUN_BASE):
+        """
+        :param store: Where the run's bundle is kept
+        :param run_id: The run's id; a UUID is minted when none is given
+        :param base: IRI base of the run's node, ``<base><run_id>``
+        :raises ValueError: ``run_id`` is not a run id (``rec.provenance.RUN_ID``)
+        """
+        self.id = run_id or str(uuid4())
+        if not RUN_ID.fullmatch(self.id):
+            raise ValueError(f"'{self.id}' is not a run id -- use letters, digits, '-', '.', '_' or '~', not '.' or '..'")
+        self.store = store
+        self.node = URIRef(base + self.id)
+        # Read once: it inspects rec's checkout, and every step holds the store's lock.
+        self.recorder = get_py_pkg_info("rec")
+        self.beat_interval = 10.0
 
-    def _stop_time(self):
-        self.stop_time = datetime.datetime.now(datetime.UTC)
-        elapsed_time = datetime.timedelta(
-            seconds=round((self.stop_time - self.start_time).total_seconds())
+    @contextmanager
+    def _step(self, allowed: tuple[URIRef, ...], refusal: str):
+        """Yield the run's bundle and current state under the store's lock; the bundle is created on the first step.
+
+        :param allowed: The states the step may start from
+        :param refusal: Why the step is refused from any other state
+        :raises RuntimeError: The run is in a state not ``allowed``
+        """
+        with self.store.edit(self.id) as ds:
+            bundle = next((graph for graph in ds.graphs() if (graph.identifier, RDF.type, PROV.Bundle) in graph), None)
+            if bundle is None:
+                bundle = ds.graph(create_bundle(ds, self.recorder.purl))
+                load_pkg_prov(bundle, self.recorder)
+                bundle.add((self.node, RDF.type, PROV_EXT.Execution))
+                bundle.add((self.node, RDF.type, OSLC_AUTO.AutomationResult))
+                bundle.add((self.node, OSLC_AUTO.state, OSLC_AUTO.new))
+                bundle.add((self.node, OSLC_AUTO.verdict, OSLC_AUTO.unavailable))
+            state = bundle.value(self.node, OSLC_AUTO.state)
+            if state not in allowed:
+                raise RuntimeError(f"run '{self.id}' is {state.fragment} -- {refusal}")
+            yield bundle, state
+
+    def lifecycle(self) -> tuple[State, Verdict]:
+        """The run's state and verdict as the store keeps them; a run not stored is new."""
+        ds = self.store.load(self.id)
+        if ds is None:
+            return State.NEW, Verdict.UNAVAILABLE
+        ds.default_union = True
+        state, verdict = ds.value(self.node, OSLC_AUTO.state), ds.value(self.node, OSLC_AUTO.verdict)
+        return (
+            next(name for name, iri in STATES.items() if iri == state),
+            next(name for name, iri in VERDICTS.items() if iri == verdict),
         )
-        return elapsed_time
 
-    def _start_heartbeat(self):
-        if self.beat_interval > 0:
-            self._stop_heartbeat_event, self._heartbeat = IntervalTimer.create(
-                self._emit_heartbeat, self.beat_interval
-            )
-            self._heartbeat.start()
+    def queue(self):
+        """Record a new run as queued, before a runner starts it."""
+        with self._step((OSLC_AUTO.new,), "only a new run can be queued") as (bundle, _):
+            bundle.set((self.node, OSLC_AUTO.state, OSLC_AUTO.queued))
+            bundle.add((self.node, REC["queued-time"], Literal(datetime.now(UTC))))
+        logger.info("Queued run %s", self.id)
 
-    def _stop_heartbeat(self):
-        # only stop if heartbeat was started
-        if self._heartbeat is not None:
-            self._stop_heartbeat_event.set()
-            self._heartbeat.join(timeout=2)
+    def start(self):
+        """Record a new or queued run as in progress, executed by this rec on this machine."""
+        host = {
+            "hostname": socket.gethostname(),
+            "os": platform.platform(),
+            "python": platform.python_version(),
+            "cpu": platform.processor() or None,
+        }
+        with self._step((OSLC_AUTO.new, OSLC_AUTO.queued), "only a run that has not started can start") as (bundle, _):
+            # The rec that starts the run executes it; another rec may have queued it.
+            if (self.recorder.purl, RDF.type, PROV.Agent) not in bundle:
+                load_pkg_prov(bundle, self.recorder)
+            started = add_wall_instant(bundle, datetime.now(UTC), instant_id=URIRef(f"{self.node}/beginning"))
+            load_execution_prov(bundle, self.node, (), self.recorder.purl, started)
+            bundle.set((self.node, OSLC_AUTO.state, OSLC_AUTO.inProgress))
+            node = URIRef(f"{self.node}/host")
+            bundle.add((node, RDF.type, REC.Host))
+            bundle.add((node, RDF.type, PROV.Location))
+            for key, predicate in HOST_TERMS.items():
+                if host[key]:
+                    bundle.add((node, predicate, Literal(host[key])))
+            bundle.add((self.node, PROV.atLocation, node))
+        logger.info("Started run %s", self.id)
 
-    def _emit_heartbeat(self):
-        beat_time = datetime.datetime.now(datetime.UTC)
-        print("Running....")
+    def beat(self):
+        """Record that the started run is still alive."""
+        with self._step((OSLC_AUTO.inProgress, OSLC_AUTO.canceling), "only a started run beats") as (bundle, _):
+            bundle.set((self.node, REC["heartbeat-time"], Literal(datetime.now(UTC))))
 
-        # Update info on observers
-        for observer in self.observers:
-            observer.log_run_heartbeat(self._id, beat_time, result=self.result)
+    def end(self, verdict: Verdict, fail_trace: str | None = None):
+        """End the started run with its verdict: a canceling run that passed ends canceled, any other ends complete.
 
-    def _emit_cancelled(self):
-        self.status = RunStatus.CANCELLED
-        cancelled_time = datetime.datetime.now(datetime.UTC)
-
-        # Update info on observers
-        for observer in self.observers:
-            observer.log_cancelled_run(self._id, cancelled_time)
-
-    def _emit_queued(self):
-        self.status = RunStatus.QUEUED
-        queued_time = datetime.datetime.now(datetime.UTC)
-
-        # Update info on observers
-        for observer in self.observers:
-            observer.log_queued_run(self._id, queued_time)
-
-    def _emit_started(self, trigger=None, starter=None):
+        :param verdict: ``passed``, ``failed`` (an exception ended it) or ``error`` (it was interrupted)
+        :param fail_trace: The trace of what ended a failed or error run; none for a passed one
+        :raises ValueError: The verdict is unavailable, or a passed run has a trace
         """
-        Records the metadata of the starting run
-        :param trigger: An entity that triggers the run
-        :param starter: The activity that generated the trigger
-        :return:
+        if verdict is Verdict.UNAVAILABLE:
+            raise ValueError(f"run '{self.id}' cannot end without a verdict -- end it as passed, failed or error")
+        if verdict is Verdict.PASSED and fail_trace:
+            raise ValueError(f"run '{self.id}' passed with a fail trace -- only a failed or error run has one")
+        with self._step((OSLC_AUTO.inProgress, OSLC_AUTO.canceling), "only a started run can end") as (bundle, state):
+            ended = add_wall_instant(bundle, datetime.now(UTC), instant_id=URIRef(f"{self.node}/end"))
+            bundle.add((self.node, TIME.hasEnd, ended))
+            # A run that failed while canceling did not stop as asked: its verdict stands.
+            if state == OSLC_AUTO.canceling and verdict is Verdict.PASSED:
+                bundle.set((self.node, OSLC_AUTO.state, OSLC_AUTO.canceled))
+            else:
+                bundle.set((self.node, OSLC_AUTO.state, OSLC_AUTO.complete))
+                bundle.set((self.node, OSLC_AUTO.verdict, VERDICTS[verdict]))
+            if fail_trace:
+                bundle.add((self.node, REC["fail-trace"], Literal(fail_trace, datatype=XSD.string)))
+        logger.log(logging.INFO if verdict is Verdict.PASSED else logging.ERROR, "Ended run %s as %s", self.id, verdict)
+
+    def cancel(self):
+        """Cancel a queued run, or ask one in progress to stop: it ends canceled once its work returns.
+
+        A queued run that is cancelled never started, so it has neither a beginning nor an end.
         """
-        self.status = RunStatus.RUNNING
-        self._id = self._get_active_run()
-        self.start_time = datetime.datetime.now(datetime.UTC)
+        refusal = "only a queued run or one in progress can be cancelled"
+        with self._step((OSLC_AUTO.queued, OSLC_AUTO.inProgress), refusal) as (bundle, state):
+            bundle.set((self.node, OSLC_AUTO.state, OSLC_AUTO.canceled if state == OSLC_AUTO.queued else OSLC_AUTO.canceling))
+        logger.info("Cancelled run %s", self.id)
 
-        # Update info on observers
-        for observer in self.observers:
-            _id = observer.log_started_run(
-                self._id,
-                self.start_time,
-                trigger=trigger,
-                starter=starter,
-            )
-            if self._id is None:
-                self._id = _id
-                print("Starting run with ID {}".format(self._id))
+    def run(self, work: Callable[[Run], object]) -> object:
+        """Start the run, do ``work(self)`` while the run beats, and end it by how the work ended.
 
-    def _emit_completed(self):
-        self.status = RunStatus.COMPLETED
-        elapsed_time = self._stop_time()
-        print("Completed after {}".format(elapsed_time))
+        ``work`` sees a cancel request as ``self.lifecycle()[0] is State.CANCELING``.
 
-        # Update info on observers
-        for observer in self.observers:
-            observer.log_completed_run(self._id, self.stop_time)
-
-    def _emit_interrupted(self):
-        self.status = RunStatus.INTERRUPTED
-        elapsed_time = self._stop_time()
-
-        # Update info on observers
-        for observer in self.observers:
-            observer.log_interrupted_run(self._id, elapsed_time)
-
-    def _emit_failed(self):
-        self.status = RunStatus.FAILED
-        elapsed_time = self._stop_time()
-
-        # Update info on observers
-        for observer in self.observers:
-            observer.log_failed_run(self._id, elapsed_time)
-
-    def _execute_hooks(self, hooks):
-        for hook in hooks:
-            hook()
-
-    def main(self):
-        pass
-
-    def run(self):
+        :returns: What ``work`` returned, None if it raised; rec does not record it
+        :raises BaseException: What interrupted ``work``, e.g. ``KeyboardInterrupt``, once the run is ended as error
         """
-        A centralized runner can start and complete a run. Decentralized runners should not use this method.
-        :return:
-        """
+        self.start()
+        stopped = threading.Event()
 
+        def beat_until_stopped():
+            while not stopped.wait(self.beat_interval):
+                # A store briefly out of reach must not stop the beats that follow.
+                try:
+                    self.beat()
+                except Exception:
+                    logger.exception("Run %s could not record its heartbeat", self.id)
+
+        beating = threading.Thread(target=beat_until_stopped, daemon=True)
+        error, result = None, None
         try:
-            self._emit_started()
-            self._start_heartbeat()
-            self._execute_hooks(self.pre_run_hooks)
-            self.result = self.main()
-            print("Result: {}".format(self.result))
-            self._emit_completed()
-            self._stop_heartbeat()
-            self._execute_hooks(self.post_run_hooks)
-        except KeyboardInterrupt as k:
-            self._stop_heartbeat()
-            self._emit_interrupted()
-        except Exception as ex:
-            self._stop_heartbeat()
-            self._emit_failed()
+            beating.start()
+            result = work(self)
+        except BaseException as caught:
+            error = caught
         finally:
-            for observer in self.observers:
-                observer.close()
-
-        return self.result
-
-    def log_scalar(self, metric_name, value, step: int = None):
-        """Log a measurement at runtime
-
-        :param metric_name: Name of the metric being logged
-        :param value: The measured value
-        :param step: Optional. Integer value representing the iteration number
-        :return:
-        """
-        pass
-
-    def log_sources(self):
-        """Log the source code files used to execute this run (e.g., file name/path, md5)
-        :return:
-        """
-        pass
-
-    def log_repositories(self):
-        """
-        Log the git information of the sources used in this run (url, commit/tag, uncommited changes)
-        :return:
-        """
-        pass
-
-    def log_dependencies(self):
-        """
-        Log the dependencies of the sources used in this run (e.g., package name, version)
-        :return:
-        """
-        pass
-
-    def log_host_info(self):
-        """
-        Log information about the machine executing this run (e.g., cpu, gpu, OS, user, hostname, python version and venv, env variables, etc.)
-        :return:
-        """
-        pass
-
-    def add_agent(self, agent_id: str, agent_type: str, **kwargs):
-        """
-        Add an agent (e.g., a robot) to the run
-        :param agent_id: A unique ID for this agent
-        :param agent_type: The type of agent being added, e.g., software agent, robot etc.
-        :param kwargs:
-        :return:
-        """
-        pass
-
-    def add_resource(
-        self,
-        filename,
-        usage_activity=None,
-        usage_time=None,
-        title=None,
-        **kwargs,
-    ):
-        """
-        Add a resource to the run
-
-        This method only records the filename and minimal metadata.
-        If you need to process file contents in some way, use a Feature.
-
-        :param filename: The file path of the resource
-        :param usage_activity: The activity that uses this resource. Default: This run
-        :param usage_time: The time this resource is used by the activity.
-        :param title: A short title for the resource. Default: The file name
-        :param kwargs:
-        :return:
-        """
-        if usage_time is None:
-            usage_time = datetime.datetime.now(datetime.UTC)
-
-    def add_artefact(
-        self,
-        filename,
-        gen_activity=None,
-        generated_time=None,
-        title=None,
-        **kwargs,
-    ):
-        """
-        Add an artefact to the run
-
-        This method only records the filename and minimal metadata.
-        If you need to process file contents in some way, use a Feature.
-
-        :param filename: he file path of the generated artefact
-        :param gen_activity: The generating activity. Default: This run
-        :param generated_time: The time the artefact was generated
-        :param title: A short title for the generated artefact
-        :param kwargs:
-        :return:
-        """
-        if generated_time is None:
-            generated_time = datetime.datetime.now(datetime.UTC)
-
-    def info(self):
-        """Print out a summary of the run data
-
-        :return:
-        """
-        pass
-
-
-class RunStatus:
-    RUNNING = "RUNNING"
-    COMPLETED = "COMPLETED"
-    FAILED = "FAILED"
-    INTERRUPTED = "INTERRUPTED"
-    CANCELLED = "CANCELLED"
-    QUEUED = "QUEUED"
-    TIMED_OUT = "TIMED_OUT"
-    DEAD = "DEAD"
+            stopped.set()
+            # Bounded: a beat stuck on the store must not keep the run from ending.
+            beating.join(timeout=self.beat_interval)
+        try:
+            if error is None:
+                self.end(Verdict.PASSED)
+            else:
+                self.end(Verdict.FAILED if isinstance(error, Exception) else Verdict.ERROR, "".join(traceback.format_exception(error)))
+        finally:
+            # An interrupt is the process being asked to stop: passed on even when the end cannot be recorded.
+            if error is not None and not isinstance(error, Exception):
+                raise error
+        return result
