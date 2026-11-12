@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any
 
 from rdf_utils import DatasetFormat
-from rdf_utils.models.prov import PackageInfo, load_execution_prov, load_pkg_prov
+from rdf_utils.models.prov import PackageInfo, add_entity, load_execution_prov, load_pkg_prov
 from rdf_utils.models.time import add_wall_instant
 from rdf_utils.models.vocab import URI_SPDX_SW_TYPE_PACKAGE
 from rdflib import XSD, Dataset, Graph, Literal, Namespace, URIRef
@@ -73,6 +73,8 @@ def dataset(record: RunRecord, base: str = RUN_BASE) -> Dataset:
 
     for package in record.packages:
         load_pkg_prov(g, package)
+        # A software agent the run used is also an entity (PROV-DM 5.3), as prov:used requires.
+        add_entity(g, package.purl)
     used = [package.purl for package in record.packages]
     ended = None
     if record.end_time:
