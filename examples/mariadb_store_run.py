@@ -3,6 +3,8 @@
 Needs the `mariadb` extra and the connection settings in `.env` (see the README).
 """
 
+from rdf_utils.models.prov import get_py_pkg_info
+
 from rec import State
 from rec.observer import Observer
 from rec.run import Run
@@ -11,13 +13,9 @@ from rec.stores.mariadb_store import MariaDBStore
 
 class DrawerOpeningRun(Run):
     def main(self):
-        self.add_agent("https://example.org/agent/dual-arm", "Agent", name="dual-arm")
-        self.add_resource("config/cabinet.yaml")
+        self.log_packages([get_py_pkg_info("rdflib")])
         if self.state is State.CANCELING:
             return "stopped"
-        self.add_artefact("results/drawer-opening.bag")
-        self.log_scalar("loop-overruns", 0)
-        self.log_scalar("retries", 1)
         return "opened"
 
 
@@ -38,6 +36,6 @@ if __name__ == "__main__":
     kept.run()
     record = observer.store.load(kept.id)
     assert record is not None
-    print(record.state, record.verdict, [(metric.name, metric.step, metric.value) for metric in record.metrics])
+    print(record.state, record.verdict, [package.purl for package in record.packages])
     print("canceled:", observer.store.run_ids(State.CANCELED))
     observer.close()

@@ -1,32 +1,25 @@
-"""A store keeping runs in MariaDB tables: a row per run, and a row per item of each of its lists."""
+"""A store keeping runs in MariaDB tables: a row per run, and a row per package it used or was recorded by."""
 
 import os
 import threading
 from contextlib import contextmanager
-from dataclasses import asdict, fields, is_dataclass
+from dataclasses import fields
 from datetime import UTC, datetime
 from enum import Enum
 from importlib.resources import files
-from types import UnionType
-from typing import Any, get_args, get_origin, get_type_hints
 
 import mariadb
 from dotenv import load_dotenv
+from rdf_utils.models.prov import PackageInfo
+from rdflib import URIRef
 
 from rec import State, Verdict
-from rec.record import KEYS, FileRef, Generation, Metric, RunRecord, Usage
+from rec.record import Host, RunRecord
 from rec.stores import RunHandle, Store
 
-# mariadb.sql follows RunRecord: a list field is a table, a dataclass field `<field>_<item>` run columns.
-RECORD_FIELDS = get_type_hints(RunRecord)
-TABLES = {name: get_args(hint)[0] for name, hint in RECORD_FIELDS.items() if get_origin(hint) is list}
-PARTS = {
-    name: get_args(hint)[0]
-    for name, hint in RECORD_FIELDS.items()
-    if get_origin(hint) is UnionType and is_dataclass(get_args(hint)[0])
-}
-# Optional columns of a unique key, kept as "" for None: MariaDB's UNIQUE treats NULLs as distinct.
-KEY_TEXT = ("root", "activity")
+# The columns of `<prefix>_packages` besides `run` and `recorder`: what `load_pkg_prov` records.
+PACKAGE_COLUMNS = ("purl", "name", "version", "revision", "repository", "dirty")
+TABLES = ("packages", "runs")
 
 
 class MariaDBStore(Store):
@@ -37,8 +30,8 @@ class MariaDBStore(Store):
 
         :param db_name: Name of the database
         :param prefix: Prefix of the table names: ``<prefix>_runs`` has a row per run, ``id`` in the
-            order runs were added; ``<prefix>_metrics``, ``<prefix>_artefacts`` and the other lists
-            have a row per item, ``run`` naming its run's ``id``
+            order runs were added; ``<prefix>_packages`` has a row per package, ``run`` naming its
+            run's ``id`` and ``recorder`` set for the rec that recorded it
         """
         load_dotenv()
         self.db_name = db_name
@@ -65,11 +58,25 @@ class MariaDBStore(Store):
             columns = cursor.fetchone()
             if columns is None:
                 return None
-            record = _row(RunRecord, columns)
-            for kind, cls in TABLES.items():
-                cursor.execute(f"SELECT * FROM {self.prefix}_{kind} WHERE run = ?", (columns["id"],))
-                setattr(record, kind, [_row(cls, row) for row in cursor.fetchall()])
-        return record
+            cursor.execute(f"SELECT * FROM {self.prefix}_packages WHERE run = ?", (columns["id"],))
+            packages = cursor.fetchall()
+        host = {item.name: columns.pop(f"host_{item.name}") for item in fields(Host)}
+        times = {name: columns[name].replace(tzinfo=UTC) for name in ("queued_time", "start_time", "end_time", "heartbeat_time") if columns[name]}
+        by_role = {True: [], False: []}
+        for row in packages:
+            values = {name: row[name] for name in PACKAGE_COLUMNS}
+            by_role[bool(row["recorder"])].append(PackageInfo(**values | {"purl": URIRef(values["purl"]), "dirty": bool(values["dirty"])}))
+        return RunRecord(
+            run_id=run_id,
+            bundle=URIRef(columns["bundle"]) if columns["bundle"] else None,
+            state=State(columns["state"]),
+            verdict=Verdict(columns["verdict"]),
+            fail_trace=columns["fail_trace"],
+            recorder=next(iter(by_role[True]), None),
+            host=Host(**host) if any(value is not None for value in host.values()) else None,
+            packages=by_role[False],
+            **times,
+        )
 
     @contextmanager
     def edit(self, run_id: str):
@@ -80,16 +87,16 @@ class MariaDBStore(Store):
         with self._lock:
             self.conn.begin()
             try:
-                self.cursor.execute(f"SELECT id, state FROM {self.prefix}_runs WHERE run_id = ? FOR UPDATE", (run_id,))
+                self.cursor.execute(f"SELECT id, state, bundle FROM {self.prefix}_runs WHERE run_id = ? FOR UPDATE", (run_id,))
                 row = self.cursor.fetchone()
                 if row is None:
                     new = RunRecord(run_id)
                     self.cursor.execute(
-                        f"INSERT INTO {self.prefix}_runs (run_id, state, verdict) VALUES (?, ?, ?) RETURNING id, state",
+                        f"INSERT INTO {self.prefix}_runs (run_id, state, verdict) VALUES (?, ?, ?) RETURNING id, state, bundle",
                         (new.run_id, str(new.state), str(new.verdict)),
                     )
                     row = self.cursor.fetchone()
-                yield MariaDBRun(self, run_id, row[0], State(row[1]))
+                yield MariaDBRun(self, run_id, row[0], State(row[1]), URIRef(row[2]) if row[2] else None)
             except BaseException:
                 self.conn.rollback()
                 raise
@@ -111,95 +118,51 @@ class MariaDBStore(Store):
 class MariaDBRun(RunHandle):
     """A run's rows, locked by the transaction of the edit that yields it; each change is one statement."""
 
-    def __init__(self, store: MariaDBStore, run_id: str, id: int, state: State):
+    def __init__(self, store: MariaDBStore, run_id: str, id: int, state: State, bundle: URIRef | None):
         """
         :param store: The store whose transaction holds the run
         :param run_id: The run's id
-        :param id: The run's ``id`` in ``<prefix>_runs``, which its list rows name as ``run``
+        :param id: The run's ``id`` in ``<prefix>_runs``, which its package rows name as ``run``
         :param state: The run's state when the edit began
+        :param bundle: The run's bundle when the edit began
         """
         self.store = store
         self.run_id = run_id
         self.id = id
         self.state = state
+        self.bundle = bundle
 
     def update(self, **values):
+        if "recorder" in values:
+            self._insert_package(values.pop("recorder"), recorder=True)
         columns = {}
         for name, value in values.items():
-            if name in PARTS:
-                columns |= {f"{name}_{item.name}": getattr(value, item.name) if value else None for item in fields(PARTS[name])}
+            if name == "host":
+                columns |= {f"host_{item.name}": getattr(value, item.name) if value else None for item in fields(Host)}
+            elif isinstance(value, datetime):
+                columns[name] = value.astimezone(UTC).replace(tzinfo=None)
+            elif isinstance(value, (Enum, URIRef)):
+                columns[name] = str(value)
             else:
                 columns[name] = value
-        columns = _columns(columns)
-        self.store.cursor.execute(
-            f"UPDATE {self.store.prefix}_runs SET {', '.join(f'`{name}` = ?' for name in columns)} WHERE id = ?",
-            (*columns.values(), self.id),
-        )
-        self.state = values.get("state", self.state)
-
-    def add(self, kind: str, row, replace: bool = False):
-        activity = row.activity if isinstance(row, (Usage, Generation)) else None
-        if activity is not None:
-            self.store.cursor.execute(f"SELECT 1 FROM {self.store.prefix}_activities WHERE run = ? AND id = ?", (self.id, activity))
-            if self.store.cursor.fetchone() is None:
-                raise ValueError(f"run '{self.run_id}' has no activity '{activity}' -- add it to the run first")
-        values = asdict(row)
-        values = _columns({**values.pop("file", {}), **values})
-        if kind == "metrics":
-            values["is_integer"] = isinstance(values["value"], int)
-        names = ", ".join(f"`{name}`" for name in values)
-        statement = f"INSERT INTO {self.store.prefix}_{kind} (run, {names}) VALUES (?{', ?' * len(values)})"
-        if replace:
-            statement += " ON DUPLICATE KEY UPDATE " + ", ".join(f"`{name}` = VALUE(`{name}`)" for name in values)
-        try:
-            self.store.cursor.execute(statement, (self.id, *values.values()))
-        except mariadb.IntegrityError as error:
-            raise ValueError(f"run '{self.run_id}' already has {KEYS[kind](row)} among its {kind} -- each is logged once") from error
-
-    def add_metric(self, name: str, value: float, step: int | None = None, time: datetime | None = None):
-        if step is None:
+        if columns:
             self.store.cursor.execute(
-                f"SELECT COALESCE(MAX(step) + 1, 0) FROM {self.store.prefix}_metrics WHERE run = ? AND name = ?",
-                (self.id, name),
+                f"UPDATE {self.store.prefix}_runs SET {', '.join(f'`{name}` = ?' for name in columns)} WHERE id = ?",
+                (*columns.values(), self.id),
             )
-            step = int(self.store.cursor.fetchone()[0])
-        self.add("metrics", Metric(name, step, value, time), replace=True)
+        self.state = values.get("state", self.state)
+        self.bundle = values.get("bundle", self.bundle)
 
+    def add_package(self, package: PackageInfo):
+        try:
+            self._insert_package(package, recorder=False)
+        except mariadb.IntegrityError as error:
+            raise ValueError(f"run '{self.run_id}' already has package '{package.purl}' -- each is logged once") from error
 
-def _columns(values: dict) -> dict:
-    """Values as columns hold them: times in UTC without a zone, enums as text, no NULL in a unique key."""
-    columns = {}
-    for name, value in values.items():
-        if isinstance(value, datetime):
-            value = value.astimezone(UTC).replace(tzinfo=None)
-        elif isinstance(value, Enum):
-            value = str(value)
-        elif value is None and name in KEY_TEXT:
-            value = ""
-        columns[name] = value
-    return columns
-
-
-def _row[T](cls: type[T], columns: dict) -> T:
-    """A row of the record, from the columns ``_columns`` wrote."""
-    values: dict[str, Any] = {}
-    for name, value in columns.items():
-        if isinstance(value, datetime):
-            value = value.replace(tzinfo=UTC)
-        elif value == "" and name in KEY_TEXT:
-            value = None
-        if name != "run":
-            values[name] = value
-    if cls is RunRecord:
-        # The table key; a list row's ``id`` is data, e.g. an agent's IRI.
-        values.pop("id")
-        for name, part in PARTS.items():
-            kept = {item.name: values.pop(f"{name}_{item.name}") for item in fields(part)}
-            values[name] = part(**kept) if any(value is not None for value in kept.values()) else None
-        values["state"], values["verdict"] = State(values["state"]), Verdict(values["verdict"])
-    if cls in (Usage, Generation):
-        values["file"] = FileRef(**{item.name: values.pop(item.name) for item in fields(FileRef)})
-    if cls is Metric:
-        is_integer = values.pop("is_integer")
-        values["value"] = int(values["value"]) if is_integer else values["value"]
-    return cls(**values)
+    def _insert_package(self, package: PackageInfo, recorder: bool):
+        values = [str(getattr(package, name)) if name == "purl" else getattr(package, name) for name in PACKAGE_COLUMNS]
+        self.store.cursor.execute(
+            f"INSERT INTO {self.store.prefix}_packages (run, {', '.join(f'`{name}`' for name in PACKAGE_COLUMNS)}, recorder)"
+            f" VALUES (?{', ?' * len(PACKAGE_COLUMNS)}, ?)",
+            (self.id, *values, recorder),
+        )

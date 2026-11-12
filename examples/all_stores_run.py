@@ -1,8 +1,9 @@
-"""Record one run in all three stores at once -- PROV document, JSON record, MariaDB tables -- and check they give back the same graph.
+"""Record one run in a PROV bundle file and in MariaDB tables at once, and check they give back the same run.
 
 Needs the `mariadb` extra and the connection settings in `.env` (see the README).
 """
 
+from rdf_utils.models.prov import get_py_pkg_info
 from rdflib.compare import isomorphic
 
 from rec import provenance
@@ -14,25 +15,21 @@ from rec.stores.mariadb_store import MariaDBStore
 
 class ScrewingRun(Run):
     def main(self):
-        self.add_agent("https://example.org/agent/arm", "Agent", name="arm")
-        self.log_dependencies([{"name": "rdflib", "version": "7.6.0"}])
-        self.add_resource("config/screw.yaml")
-        self.add_artefact("results/torque.csv")
-        # One count per screw: a step per attempt, not per sample.
-        for screw, attempts in enumerate([1, 2, 1]):
-            self.log_scalar("attempts", attempts, screw)
-        self.log_scalar("safety-stops", 0)
+        self.log_packages([get_py_pkg_info("rdflib")])
         return 3
 
 
 if __name__ == "__main__":
-    stores = [FileStore("runs/prov"), FileStore("runs/json", fmt="json"), MariaDBStore(db_name="logbook", prefix="logs")]
+    stores = [FileStore("runs/prov"), MariaDBStore(db_name="logbook", prefix="logs")]
     observers = [Observer(store) for store in stores]
     run = ScrewingRun(observers=observers, run_id="screw-1")
     run.run()
 
-    prov, records, tables = (provenance.graph(store.load(run.id)) for store in stores)
-    assert isomorphic(prov, records) and isomorphic(prov, tables)
-    print(prov.serialize(format="turtle"))
+    from_file, from_tables = (store.load(run.id) for store in stores)
+    # Each store minted its own bundle on the run's first edit.
+    from_tables.bundle = from_file.bundle
+    bundle, tables = (provenance.dataset(record).graph(record.bundle) for record in (from_file, from_tables))
+    assert isomorphic(bundle, tables)
+    print(bundle.serialize(format="turtle"))
     for observer in observers:
         observer.close()

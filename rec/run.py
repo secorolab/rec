@@ -1,5 +1,4 @@
 import datetime
-import inspect
 import logging
 import platform
 import socket
@@ -8,6 +7,8 @@ import traceback
 from collections.abc import Sequence
 from contextlib import ExitStack, contextmanager
 from uuid import uuid4
+
+from rdf_utils.models.prov import PackageInfo
 
 from rec import State, Verdict
 from rec.observer import Observer
@@ -100,25 +101,13 @@ class Run:
         for observer in self.observers:
             observer.log_run_heartbeat(self.id, beat_time)
 
-    def _emit_started(self, trigger_entity=None, trigger_generator=None):
-        """
-        Records the metadata of the starting run
-        :param trigger_entity: An entity that triggers the run
-        :param trigger_generator: The activity that generated the trigger entity
-        """
+    def _emit_started(self):
+        """Record the run as started, on the machine executing it"""
         start_time = datetime.datetime.now(datetime.UTC)
         logger.info("Starting run %s", self.id)
-
-        try:
-            program = inspect.getfile(type(self))
-        except (TypeError, OSError):
-            # A class typed into an interpreter has no file to name.
-            program = None
         with self._held():
             for observer in self.observers:
-                observer.log_started_run(
-                    self.id, start_time, trigger_entity=trigger_entity, trigger_generator=trigger_generator, program=program
-                )
+                observer.log_started_run(self.id, start_time)
         self.log_host_info(host_info())
 
     def _emit_ended(self, error=None):
@@ -127,7 +116,7 @@ class Run:
         with self._held():
             for observer in self.observers:
                 if error is None:
-                    observer.log_completed_run(self.id, end_time, None if self.result is None else str(self.result))
+                    observer.log_completed_run(self.id, end_time)
                 elif isinstance(error, KeyboardInterrupt):
                     observer.log_interrupted_run(self.id, end_time, _fail_trace(error))
                 else:
@@ -158,14 +147,13 @@ class Run:
                 observer.log_cancelled_run(self.id, cancel_time)
         logger.info("Cancelled run %s", self.id)
 
-    def run(self, trigger_entity=None, trigger_generator=None):
+    def run(self):
         """
         Start the run, execute ``main`` and record how it ended
-        :param trigger_entity: An entity that triggers the run
-        :param trigger_generator: The activity that generated the trigger entity
+        :returns: What ``main`` returned; rec does not record it
         :raises RuntimeError: The store holds the run as started or canceled
         """
-        self._emit_started(trigger_entity, trigger_generator)
+        self._emit_started()
         failure = None
         try:
             # Stopped before the end is recorded: a late beat would find the run ended and raise.
@@ -179,121 +167,21 @@ class Run:
         self._emit_ended(failure)
         return self.result
 
-    def log_scalar(self, metric_name, value, step: int | None = None):
-        """Log a measurement at runtime
-
-        :param metric_name: Name of the metric being logged
-        :param value: The measured value
-        :param step: Optional. Integer value representing the iteration number
-        """
-        now = datetime.datetime.now(datetime.UTC)
-        for observer in self.observers:
-            observer.log_scalar(self.id, metric_name, value, step, now)
-
-    def log_repositories(self, repositories: list):
-        """
-        Log the git information of the sources used in this run (url, commit/tag, uncommited changes)
-        :param repositories: rows with a ``name`` and optionally ``url``, ``commit``
-        """
-        for observer in self.observers:
-            observer.log_repositories(self.id, repositories)
-
-    def log_dependencies(self, dependencies: list):
-        """
-        Log the dependencies of the sources used in this run (e.g., package name, version)
-        :param dependencies: rows with a ``name`` and optionally ``version``
-        """
-        for observer in self.observers:
-            observer.log_dependencies(self.id, dependencies)
-
     def log_host_info(self, host_info: dict):
         """
-        Log information about the machine executing this run (e.g., cpu, gpu, OS, user, hostname, python version and venv, env variables, etc.)
+        Log information about the machine executing this run
         :param host_info: ``hostname``, ``os``, ``python``, ``cpu``; see :func:`host_info`
         """
         for observer in self.observers:
             observer.log_host_info(self.id, host_info)
 
-    def add_agent(self, agent_id: str, agent_type: str, name: str | None = None):
+    def log_packages(self, packages: list[PackageInfo]):
         """
-        Add an agent (e.g., a robot) to the run
-        :param agent_id: A unique ID for this agent
-        :param agent_type: A PROV agent class: Agent, SoftwareAgent, Person or Organization
-        :param name: The agent's name; a software agent must have one
+        Log the software packages this run used
+        :param packages: e.g. from rdf-utils ``get_py_pkg_info`` or ``get_ros_pkg_info``
         """
         for observer in self.observers:
-            observer.add_agent(self.id, agent_id, agent_type, name)
-
-    def add_activity(
-        self,
-        activity_id: str,
-        kind: str,
-        agent_id: str,
-        start_time: datetime.datetime,
-        end_time: datetime.datetime | None = None,
-    ):
-        """
-        Add a step of the run (e.g., a calibration) that resources and artefacts can name as their activity
-        :param activity_id: The activity's IRI
-        :param kind: A prov-extension activity class: Specification, Transformation, Generalization, Execution or Assurance
-        :param agent_id: The agent that did it
-        :param start_time: When it started
-        :param end_time: When it ended
-        """
-        for observer in self.observers:
-            observer.add_activity(self.id, activity_id, kind, agent_id, start_time, end_time)
-
-    def add_resource(
-        self,
-        filename,
-        usage_activity=None,
-        usage_time=None,
-        title=None,
-        sha256=None,
-        size_bytes=None,
-    ):
-        """
-        Add a resource to the run
-
-        This method only records the filename and minimal metadata.
-
-        :param filename: The file path of the resource
-        :param usage_activity: The activity that uses this resource. Default: This run
-        :param usage_time: The time this resource is used by the activity.
-        :param title: A short title for the resource. Default: The file name
-        :param sha256: The file's SHA-256 checksum, as hex
-        :param size_bytes: The file's size
-        """
-        if usage_time is None:
-            usage_time = datetime.datetime.now(datetime.UTC)
-        for observer in self.observers:
-            observer.add_resource(self.id, filename, usage_activity, usage_time, title, sha256, size_bytes)
-
-    def add_artefact(
-        self,
-        filename,
-        gen_activity=None,
-        generated_time=None,
-        title=None,
-        sha256=None,
-        size_bytes=None,
-    ):
-        """
-        Add an artefact to the run
-
-        This method only records the filename and minimal metadata.
-
-        :param filename: he file path of the generated artefact
-        :param gen_activity: The generating activity. Default: This run
-        :param generated_time: The time the artefact was generated
-        :param title: A short title for the generated artefact
-        :param sha256: The file's SHA-256 checksum, as hex
-        :param size_bytes: The file's size
-        """
-        if generated_time is None:
-            generated_time = datetime.datetime.now(datetime.UTC)
-        for observer in self.observers:
-            observer.add_artefact(self.id, filename, gen_activity, generated_time, title, sha256, size_bytes)
+            observer.log_packages(self.id, packages)
 
 
 def _fail_trace(error):

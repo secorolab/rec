@@ -1,8 +1,9 @@
 # Robot Execution Catalog (REC)
 
 REC makes the data of robot executions [FAIR](https://www.go-fair.org/fair-principles/): it records
-each run's provenance in [PROV](https://www.w3.org/TR/prov-o/), on the
-[rec and prov-extension vocabularies](https://secorolab.github.io/metamodels/).
+each run's lifecycle in [PROV](https://www.w3.org/TR/prov-o/), on the
+[rec and prov-extension vocabularies](https://secorolab.github.io/metamodels/), as a provenance
+bundle written with [rdf-utils](https://github.com/minhnh/rdf-utils).
 
 ## Installation
 
@@ -13,9 +14,11 @@ pip install -e ".[mariadb]"   # and the MariaDB store
 
 ## Recording a run
 
-A run is a `Run` subclass; `main` does the work and logs what it uses and generates.
+A run is a `Run` subclass; `main` does the work and logs the software packages it uses.
 
 ```python
+from rdf_utils.models.prov import get_py_pkg_info
+
 from rec.observer import Observer
 from rec.run import Run
 from rec.stores.file_store import FileStore
@@ -23,11 +26,7 @@ from rec.stores.file_store import FileStore
 
 class PickPlaceRun(Run):
     def main(self):
-        self.add_agent("https://example.org/agent/arm", "Agent", name="arm")
-        self.log_repositories([{"name": "controller", "url": "https://example.org/lab/controller", "commit": "0123abcd"}])
-        self.add_resource("config/robot.yaml")
-        self.add_artefact("results/trajectory.csv")
-        self.log_scalar("final-position-error", 0.004)
+        self.log_packages([get_py_pkg_info("controller")])
         return "placed"
 
 
@@ -36,21 +35,12 @@ PickPlaceRun(observers=[observer], run_id="pick-place-1").run()
 observer.close()
 ```
 
-`run()` records the start, runs `main`, and ends the run as `passed`, `failed` (`main` raised) or
-`error` (interrupted). What `main` returns is kept as the run's result.
+`run()` records the start and the host, runs `main`, and ends the run as `passed`, `failed`
+(`main` raised) or `error` (interrupted). It returns what `main` returned; rec does not record it.
 
-### Steps of a run
-
-A step is an activity of a prov-extension kind (`Execution`, `Assurance`, `Transformation`,
-`Generalization`, `Specification`) that is `dcterms:isPartOf` the run. Files name the step that
-used or generated them:
-
-```python
-calibration = "https://example.org/calibration/1"
-self.add_activity(calibration, "Execution", "https://example.org/agent/arm", start, end)
-self.add_resource("config/robot.yaml", usage_activity=calibration)
-self.add_artefact("results/calibration.json", gen_activity=calibration)
-```
+Files a run uses or generates, and its steps, are recorded by the tool that knows them, with
+rdf-utils' `add_file_entity`, `add_activity` and the `load_*_prov` helpers, in that tool's own
+bundle.
 
 ### Queueing and cancelling
 
@@ -70,103 +60,55 @@ Run(observers=[Observer(MariaDBStore())], run_id="drawer-2").cancel()
 | anything else | `RuntimeError` |
 
 The store decides every step under a lock (`flock` for files, `SELECT ... FOR UPDATE` for
-MariaDB): only a new run is queued, only a new or queued run starts.
+MariaDB): only a new run is queued, only a new or queued run starts. A started run beats every
+`beat_interval` seconds, recorded as `rec:heartbeat-time`.
 
 ## Stores
 
 | Store | Keeps a run as |
 |---|---|
-| `FileStore(dir)` | its PROV document, `<run_id>.ld.json` |
-| `FileStore(dir, fmt="json")` | the `RunRecord` as `<run_id>.json` |
-| `MariaDBStore(db_name, prefix)` | a row of `<prefix>_runs` and a row per list item, see [mariadb.sql](rec/stores/mariadb.sql) |
+| `FileStore(dir)` | its bundle, `<run_id>.ld.json`; `fmt=DatasetFormat.TRIG` or `NQUADS` for `.trig`, `.nq` |
+| `MariaDBStore(db_name, prefix)` | a row of `<prefix>_runs` and a row per package in `<prefix>_packages`, see [mariadb.sql](rec/stores/mariadb.sql) |
 
-All keep the same record. A run may have several observers, one store each:
+A run may have several observers, one store each. Each store names the run's bundle on its first
+edit, so two stores hold the same run in differently named bundles. Any object with `load`,
+`edit`, `run_ids` and `close` is a store (`rec.stores.Store`).
 
-```python
-stores = [FileStore("runs/prov"), FileStore("runs/json", fmt="json"), MariaDBStore()]
-run = ScrewingRun(observers=[Observer(store) for store in stores], run_id="screw-1")
-run.run()
-
-graphs = [provenance.graph(store.load("screw-1")) for store in stores]
-assert all(isomorphic(graphs[0], graph) for graph in graphs)
-```
-
-### One artefact in each store
-
-```python
-self.add_artefact("results/trajectory.csv", sha256="9f86d0...0a08", size_bytes=2048)  # logged from /home/lab
-```
-
-`FileStore(dir)`, `<run_id>.ld.json` (shown as Turtle; `run:` is `https://secoro.uni-bremen.de/rec/run/`):
-
-```turtle
-<run:pick-place-1/file/%2Fhome%2Flab/results%2Ftrajectory.csv>
-    a prov:Entity ;
-    prov:atLocation [ a prov-ext:RelativeLocation ;
-                      prov-ext:rel-path "results/trajectory.csv"^^xsd:anyURI ;
-                      prov:atLocation <file:///home/lab/> ] ;
-    prov:wasGeneratedBy run:pick-place-1 ;
-    prov:qualifiedGeneration [ a prov:Generation ;
-                               prov:activity run:pick-place-1 ;
-                               prov:atTime "2026-10-15T09:30:00+00:00"^^xsd:dateTime ] ;
-    spdx:checksum [ a spdx:Checksum ;
-                    spdx:algorithm spdx:checksumAlgorithm_sha256 ;
-                    spdx:checksumValue "9f86d0...0a08"^^xsd:hexBinary ] ;
-    dcat:byteSize "2048"^^xsd:nonNegativeInteger .
-```
-
-`FileStore(dir, fmt="json")`, `<run_id>.json`:
-
-```json
-"artefacts": [
-  {
-    "file": {"path": "results/trajectory.csv", "root": "/home/lab", "title": null,
-             "sha256": "9f86d0...0a08", "size_bytes": 2048},
-    "activity": null,
-    "time": "2026-10-15T09:30:00+00:00"
-  }
-]
-```
-
-`MariaDBStore()`, a row of `logs_artefacts` (`run` is the run's `id` in `logs_runs`; `activity` is
-`''` for the run itself):
-
-| run | path | root | title | sha256 | size_bytes | activity | time |
-|---|---|---|---|---|---|---|---|
-| 1 | results/trajectory.csv | /home/lab | NULL | 9f86d0...0a08 | 2048 | | 2026-10-15 09:30:00.000000 |
-
-A value one store could not give back is refused when logged: a NaN or infinite metric, or an
-item logged twice (`rec.record.KEYS`). Any object with `load`, `edit`, `run_ids` and `close` is a
-store (`rec.stores.Store`).
-
-## The PROV graph
+## The PROV bundle
 
 ```python
 from rec import provenance
 
-g = provenance.graph(store.load("pick-place-1"))      # RunRecord -> rdflib Graph
-record = provenance.record(g, "pick-place-1")         # and back
+ds = provenance.dataset(store.load("pick-place-1"))   # RunRecord -> rdflib Dataset
+record = provenance.record(ds, "pick-place-1")        # and back
 ```
 
-```turtle
-<https://secoro.uni-bremen.de/rec/run/pick-place-1>
-    a prov-ext:Execution, oslc_auto:AutomationResult ;
-    oslc_auto:state oslc_auto:complete ;
-    oslc_auto:verdict oslc_auto:passed ;
-    prov:used <.../repository/controller>, ... ;
-    prov:wasAssociatedWith <https://example.org/agent/arm> ;
-    rec:result "placed" .
+```trig
+<urn:uuid:7f1c…> {
+    <urn:uuid:7f1c…> a prov:Bundle ;
+        prov:wasAttributedTo <pkg:git/github.com/secorolab/rec@816d61f> .
+
+    <https://secoro.uni-bremen.de/rec/run/pick-place-1>
+        a prov-ext:Execution, oslc_auto:AutomationResult ;
+        oslc_auto:state oslc_auto:complete ;
+        oslc_auto:verdict oslc_auto:passed ;
+        prov:wasAssociatedWith <pkg:git/github.com/secorolab/rec@816d61f> ;
+        prov:used <pkg:git/example.org/lab/controller@0123abcd> ;
+        time:hasBeginning <https://secoro.uni-bremen.de/rec/run/pick-place-1/beginning> ;
+        time:hasEnd <https://secoro.uni-bremen.de/rec/run/pick-place-1/end> ;
+        prov:atLocation <https://secoro.uni-bremen.de/rec/run/pick-place-1/host> .
+}
 ```
 
-A run id is RFC 3986 unreserved characters (letters, digits, `-`, `.`, `_`, `~`); a run given none
-gets a UUID.
+A package is recorded by rdf-utils' `load_pkg_prov`, named by its purl. A run id is RFC 3986
+unreserved characters (letters, digits, `-`, `.`, `_`, `~`); a run given none gets a UUID.
 
 ## Examples
 
 ```shell
-python examples/file_store_run.py      # PROV and JSON files
+python examples/file_store_run.py      # JSON-LD and TriG files
 python examples/mariadb_store_run.py   # queue, cancel by id, run
-python examples/all_stores_run.py      # one run in all three stores
+python examples/all_stores_run.py      # one run in a file and in MariaDB
 ```
 
 The MariaDB examples need the `mariadb` extra and an `.env` at the repository root:

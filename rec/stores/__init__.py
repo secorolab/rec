@@ -1,36 +1,28 @@
 """Where run records are kept: any object with these methods is a store."""
 
 from contextlib import AbstractContextManager
-from datetime import datetime
 from typing import Protocol
+
+from rdf_utils.models.prov import PackageInfo
+from rdflib import URIRef
 
 from rec import State
 from rec.record import RunRecord
 
 
 class RunHandle(Protocol):
-    """A run held by ``Store.edit``: its state, and the changes made to it."""
+    """A run held by ``Store.edit``: its state and bundle, and the changes made to it."""
 
     run_id: str
     state: State
+    bundle: URIRef | None
 
     def update(self, **values) -> None:
         """Set fields of the run that it has one of, e.g. ``state``, ``start_time`` or ``host``."""
         ...
 
-    def add(self, kind: str, row, replace: bool = False) -> None:
-        """Add a row to one of the run's lists, e.g. ``artefacts``.
-
-        Raises ValueError if the list already has a row with the same key
-        (``rec.record.KEYS``), unless ``replace`` is set.
-        """
-        ...
-
-    def add_metric(self, name: str, value: float, step: int | None = None, time: datetime | None = None) -> None:
-        """Add a metric's value at ``step``, or after its last step, replacing a value at that step.
-
-        Raises ValueError for a NaN or infinite value.
-        """
+    def add_package(self, package: PackageInfo) -> None:
+        """Add a package the run used; raises ValueError if the run already has its purl."""
         ...
 
 
